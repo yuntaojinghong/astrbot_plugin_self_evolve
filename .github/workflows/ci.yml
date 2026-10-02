@@ -22,7 +22,26 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: 语法检查
-        run: python -m compileall -q main.py store.py learning tests
+        run: python -m compileall -q main.py pages_api.py store.py learning tests
+
+      - name: 版本号一致性（metadata.yaml / main.py / __init__.py）
+        run: |
+          python - <<'PY'
+          import re, sys
+          def grab(path, pattern):
+              m = re.search(pattern, open(path, encoding="utf-8").read(), re.M)
+              return m.group(1) if m else None
+          got = {
+              "metadata.yaml": grab("metadata.yaml", r"^version:\s*(\S+)\s*$"),
+              "main.py": grab("main.py", r'^__version__\s*=\s*"([^"]+)"'),
+              "__init__.py": grab("__init__.py", r'^__version__\s*=\s*"([^"]+)"'),
+          }
+          distinct = {v for v in got.values() if v}
+          if len(distinct) != 1 or None in got.values():
+              print("版本号不一致:", got)
+              sys.exit(1)
+          print(f"版本号一致: {distinct.pop()}")
+          PY
 
       - name: 离线回归测试
         run: python -X utf8 tests/test_logic.py

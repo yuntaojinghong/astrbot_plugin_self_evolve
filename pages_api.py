@@ -18,6 +18,8 @@ from typing import Any, Callable
 
 from astrbot.api import logger
 
+from . import __version__ as PLUGIN_VERSION
+
 PLUGIN_NAME = "astrbot_plugin_self_evolve"
 
 try:
@@ -101,9 +103,7 @@ class SelfEvolveWeb:
         plugin = self.plugin
         await plugin._ensure_loaded()
         return _ok({
-            "version": plugin.__class__.__module__ and getattr(
-                __import__(plugin.__class__.__module__, fromlist=["x"]), "__version__", ""
-            ),
+            "version": PLUGIN_VERSION,
             "enabled": plugin._cfg_bool("enabled"),
             "inject_enabled": plugin._cfg_bool("inject_enabled"),
             "paused": plugin._is_paused(),

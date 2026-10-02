@@ -18,17 +18,19 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: 校验版本号一致性（tag / metadata.yaml / main.py）
+      - name: 校验版本号一致性（tag / metadata.yaml / main.py / __init__.py）
         run: |
           python - <<'PY'
           import os, re, sys
           tag = os.environ["GITHUB_REF_NAME"].lstrip("v")
-          meta = open("metadata.yaml", encoding="utf-8").read()
-          m_meta = re.search(r"^version:\s*(\S+)\s*$", meta, re.M)
-          m_py = re.search(r'^__version__\s*=\s*"([^"]+)"',
-                           open("main.py", encoding="utf-8").read(), re.M)
-          got = {"metadata.yaml": m_meta and m_meta.group(1),
-                 "main.py": m_py and m_py.group(1)}
+          def grab(path, pattern):
+              m = re.search(pattern, open(path, encoding="utf-8").read(), re.M)
+              return m.group(1) if m else None
+          got = {
+              "metadata.yaml": grab("metadata.yaml", r"^version:\s*(\S+)\s*$"),
+              "main.py": grab("main.py", r'^__version__\s*=\s*"([^"]+)"'),
+              "__init__.py": grab("__init__.py", r'^__version__\s*=\s*"([^"]+)"'),
+          }
           bad = {k: v for k, v in got.items() if v != tag}
           if bad:
               print(f"版本号不一致：tag=v{tag}，{bad}")

@@ -3,6 +3,38 @@
 本文件记录 astrbot_plugin_self_evolve（自进化）的所有重要变更。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-10-03
+
+### Fixed
+
+- **配置面板打不开**（严重）：前端读 `window.parent.AstrBotPluginPage` 作为回退，
+  但面板跑在 AstrBot 的 sandbox iframe 里（origin 为 `"null"`），
+  **跨源读父窗口属性会直接抛 `SecurityError`**：
+
+  ```
+  Failed to read a named property 'AstrBotPluginPage' from 'Window':
+  Blocked a frame with origin "null" from accessing a cross-origin frame.
+  ```
+
+  页面只显示这行报错，什么数据都加载不出来。
+  AstrBot 实际是把页面 SDK 以 `<script src="/api/plugin/page/bridge-sdk.js">`
+  注入到**页面自己的 window** 上的，只需读 `window.AstrBotPluginPage`。
+
+  现在完全不碰 `window.parent`，且取值带异常保护；
+  拿不到 SDK 时给出一句可读提示（"请从插件管理里打开本页面"）而不是抛跨源错误。
+
+### Added
+
+- `tests/panel_load.test.js`：用 jsdom 真实加载面板前端，
+  在「一读 `window.parent` 就抛 SecurityError」的沙箱环境里验证面板能起来，
+  并逐条核对 SDK 调用（`ready` / `apiGet("bootstrap")` / `apiGet("overview")`）
+  与实际渲染结果（群列表、版本号、按钮文案）。
+- `tests/panel_no_bridge.test.js`：验证拿不到 SDK 时优雅降级。
+  这个用例在修复前会失败（正是用户看到的报错原文）。
+- Python 侧回归用例：静态检查前端源码不得出现 `window.parent` / `top` / `opener`，
+  保证这个坑不会被改回来。
+- CI 增加 jsdom 面板加载测试。
+
 ## [0.3.0] - 2026-10-02
 
 **阶段三（配置面板）**：把学习过程变成看得见、管得住的东西。

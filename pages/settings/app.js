@@ -37,23 +37,38 @@ function el(tag, attrs, children) {
   return node;
 }
 
-/* AstrBot 的页面 bridge：没有它就无法与后端通信 */
+/* AstrBot 的页面 bridge。
+ *
+ * 面板跑在 AstrBot 的受限 iframe 里，SDK 会以全局 `window.AstrBotPluginPage`
+ * 的形式**注入到本页面自己的 window** 上——**不是** window.parent 上的属性。
+ *
+ * 千万不要去读 window.parent.*：面板 iframe 是 sandbox 出来的（origin 为 "null"），
+ * 跨源读父窗口属性会直接抛 SecurityError，SDK 会把它报成
+ * 「Blocked a frame with origin "null" from accessing a cross-origin frame」，
+ * 整个面板就此打不开。所以这里只碰自己 window 上的这个键。
+ *
+ * 每次都重新取，不缓存：脚本可能在 SDK 注入之前就执行完了。
+ */
 function bridge() {
-  if (window.AstrBotPluginPage) return window.AstrBotPluginPage;
-  if (window.parent && window.parent.AstrBotPluginPage) return window.parent.AstrBotPluginPage;
-  return null;
+  try {
+    return window.AstrBotPluginPage || null;
+  } catch (e) {
+    return null;
+  }
 }
+
+const NO_BRIDGE =
+  "未检测到 AstrBot 页面通信接口。请从「插件管理」里点开本插件页面，不要直接访问该地址。";
 
 async function apiGet(endpoint, params) {
   const b = bridge();
-  if (!b) throw new Error("未检测到 AstrBot 页面通信接口，请从插件管理页面打开本面板。");
-  const qs = params ? "?" + new URLSearchParams(params).toString() : "";
-  return b.apiGet(endpoint + qs);
+  if (!b) throw new Error(NO_BRIDGE);
+  return b.apiGet(endpoint, params || {});
 }
 
 async function apiPost(endpoint, body) {
   const b = bridge();
-  if (!b) throw new Error("未检测到 AstrBot 页面通信接口，请从插件管理页面打开本面板。");
+  if (!b) throw new Error(NO_BRIDGE);
   return b.apiPost(endpoint, body || {});
 }
 
@@ -93,7 +108,26 @@ const SIGNAL_LABEL = {
 
 async function loadAll() {
   showError("");
+  const b = bridge();
+  if (!b) {
+    showError(NO_BRIDGE);
+    renderPlaceholder();
+    return;
+  }
   try {
+    // bridge 就绪后能拿到宿主上下文（主题等）。SDK 版本不一，这些方法都可能有也可能没有，
+    // 因此逐个判存在再调；失败也不影响数据加载。
+    try {
+      if (typeof b.ready === "function") {
+        applyTheme(await b.ready());
+      }
+      if (typeof b.onContext === "function") {
+        b.onContext((ctx) => applyTheme(ctx));
+      }
+    } catch (e) {
+      /* 忽略：主题拿不到不影响功能 */
+    }
+
     const boot = await apiGet("bootstrap");
     if (boot && boot.version) {
       const vb = $("#versionBadge");
@@ -115,6 +149,12 @@ async function loadAll() {
   } catch (e) {
     showError(String(e.message || e));
   }
+}
+
+function applyTheme(context) {
+  const isDark = context && context.isDark;
+  if (isDark === undefined) return;
+  document.documentElement.dataset.theme = isDark ? "dark" : "light";
 }
 
 function applyPauseState() {

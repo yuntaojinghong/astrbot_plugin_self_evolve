@@ -46,6 +46,12 @@ jobs:
       - name: 离线回归测试
         run: python -X utf8 tests/test_logic.py
 
+      - name: 面板前端加载测试（jsdom）
+        run: |
+          npm install --no-save --no-audit --no-fund jsdom
+          node tests/panel_load.test.js
+          node tests/panel_no_bridge.test.js
+
       - name: 市场规范检查（logger 只能来自 astrbot.api）
         run: |
           python - <<'PY'

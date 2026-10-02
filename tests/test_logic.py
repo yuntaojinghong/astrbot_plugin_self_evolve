@@ -1110,6 +1110,50 @@ async def test_panel():
 
 
 # ====================================================================== #
+#  11. 前端面板的跨源安全（回归）
+# ====================================================================== #
+
+async def test_panel_frontend_bridge():
+    """面板前端不得跨源读父窗口。
+
+    真实事故：app.js 里写成「先看 window.parent.AstrBotPluginPage」，
+    而面板跑在 AstrBot 的 sandbox iframe 里（origin 为 "null"），
+    跨源读父窗口属性会直接抛 SecurityError：
+
+        Failed to read a named property 'AstrBotPluginPage' from 'Window':
+        Blocked a frame with origin "null" from accessing a cross-origin frame.
+
+    结果整个面板打不开。SDK 实际是注入到**本页面自己的** window 上的，
+    只读 window.AstrBotPluginPage 就好。
+    """
+    import re
+
+    js_path = os.path.join(REPO, "pages", "settings", "app.js")
+    src = open(js_path, encoding="utf-8").read()
+
+    # 去掉注释后再查，避免把说明文字误判成代码
+    code = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    code = re.sub(r"^\s*//.*$", "", code, flags=re.M)
+
+    offenders = re.findall(r"window\s*\.\s*(parent|top|opener)", code)
+    check("前端不访问 window.parent / top / opener（sandbox iframe 跨源会抛错）",
+          not offenders, offenders)
+
+    check("前端从自身 window 读取 AstrBotPluginPage",
+          "window.AstrBotPluginPage" in code, None)
+    check("bridge 取值有异常保护（SDK 未注入时不炸）",
+          re.search(r"catch\s*\([^)]*\)\s*\{\s*return null", code) is not None, None)
+
+    # query 参数必须交给 SDK 传，不要自己拼进路径
+    check("不自行拼接查询串（交给 SDK 的 apiGet 处理）",
+          "URLSearchParams" not in code, None)
+
+    html = open(os.path.join(REPO, "pages", "settings", "index.html"), encoding="utf-8").read()
+    check("index.html 引用 app.js 与 style.css",
+          "app.js" in html and "style.css" in html, None)
+
+
+# ====================================================================== #
 
 async def main():
     await test_feedback()
@@ -1122,6 +1166,7 @@ async def main():
     await test_reflection()
     await test_pending_flow()
     await test_panel()
+    await test_panel_frontend_bridge()
     print(f"\n结果: {PASSED} 通过, {FAILED} 失败")
     sys.exit(1 if FAILED else 0)
 

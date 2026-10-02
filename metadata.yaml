@@ -13,7 +13,7 @@ help: >-
   发送「进化」查看本群学习总览；「进化 记忆」看学到的经验；「进化 审计」看每次调整的依据；
   「进化 遗忘」删除某条；「进化 回滚」退回上一个版本；「进化 开关 关」暂停学习与注入。
   命令默认仅管理员可用，可在插件配置面板调整。所有学习都有上限与依据，不会无限制地改变行为。
-version: 0.3.0
+version: 0.3.1
 author: yuntaojinghong
 repo: https://github.com/yuntaojinghong/astrbot_plugin_self_evolve
 social_link: https://yuntaojinghong.github.io/astrbot_plugin_self_evolve/

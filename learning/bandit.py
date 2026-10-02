@@ -154,10 +154,17 @@ class Choice:
     def update_picks(self) -> dict[str, int]:
         """反馈应当记给哪些档位。
 
-        优先用 ``explored_picks``（探索时行为虽走基线，但被探索的档位才是
-        变量的真正来源）；否则用 ``picks``。
+        以 ``picks``（实际施加的档位）为基准，再把**被探索过的**维度覆盖成
+        探索档位——探索时那些维度的行为虽走基线，但变量来自被探索的档，
+        反馈要记给它们，否则探索永远攒不到证据，样本门槛就成了死锁。
+
+        注意不能直接用 ``explored_picks`` 整体替换：它只包含被探索的维度，
+        替换会让未探索的维度丢失归因目标（曾因此把分数记到基线档上）。
         """
-        return dict(self.explored_picks or self.picks)
+        out = dict(self.picks)
+        for k, v in (self.explored_picks or {}).items():
+            out[k] = v
+        return out
 
     def key(self) -> str:
         """稳定字符串标识，用于持久化与展示。"""

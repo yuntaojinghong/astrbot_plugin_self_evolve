@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>自进化 · 控制台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">🧠</div>
+        <div class="brand-text">
+          <h1>自进化</h1>
+          <p>Learning console <span id="versionBadge" class="badge" hidden></span></p>
+        </div>
+      </div>
+
+      <div class="switch-row">
+        <button id="btnPause" class="btn ghost wide">暂停学习</button>
+        <button id="btnReload" class="btn ghost wide">刷新数据</button>
+      </div>
+
+      <div id="groupList" class="group-list"></div>
+      <p class="sidebar-foot">
+        面板只做「查看 / 审批 / 回滚」。<br>
+        策略分数是学习出来的，不提供手改入口——<br>
+        要人工干预请用经验条目与回滚。
+      </p>
+    </aside>
+
+    <main class="main">
+      <div id="error" class="alert error" hidden></div>
+      <div id="content" class="content">
+        <div class="placeholder">
+          <div class="placeholder-icon">🧠</div>
+          <p>从左侧选择一个群，查看它学到了什么。</p>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

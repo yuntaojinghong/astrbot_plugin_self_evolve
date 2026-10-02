@@ -87,10 +87,20 @@ class MessageChain:
 class Context:
     def __init__(self):
         self.sent = []
+        self.routes = []
 
     async def send_message(self, session_str, chain):
         self.sent.append((session_str, chain))
         return True
+
+    def register_web_api(self, route, handler, methods, desc):
+        self.routes.append((route, handler, tuple(methods), desc))
+
+    def get_all_providers(self):
+        return []
+
+    async def llm_generate(self, chat_provider_id=None, prompt=""):
+        return types.SimpleNamespace(completion_text="")
 
 
 class Star:
@@ -136,6 +146,27 @@ _module("astrbot.core.utils")
 _module("astrbot.core.utils.astrbot_path",
         get_astrbot_plugin_data_path=lambda: TEST_DATA_ROOT)
 
+
+# astrbot.api.web：面板后端依赖它。这里提供最小可用实现，
+# 让面板代码能在离线环境下被真实导入与调用（否则 CI 只能靠"没报错"来确认）。
+class _WebReq:
+    def __init__(self):
+        self.query = {}
+        self._json = {}
+
+    def get(self, key, default=None):
+        return self.query.get(key, default)
+
+    async def json(self, default=None):
+        return self._json or (default or {})
+
+
+WEB_REQ = _WebReq()
+_module("astrbot.api.web",
+        json_response=lambda payload: payload,
+        error_response=lambda msg, status_code=400: {"error": msg, "code": status_code},
+        request=WEB_REQ)
+
 # ---------------------------------------------------------------------- #
 # 加载被测模块
 # ---------------------------------------------------------------------- #
@@ -162,6 +193,7 @@ profile = importlib.import_module(f"{PKG}.learning.profile")
 store_mod = importlib.import_module(f"{PKG}.store")
 T_reflect = importlib.import_module(f"{PKG}.learning.reflect")
 main_mod = importlib.import_module(f"{PKG}.main")
+T_pages_api = importlib.import_module(f"{PKG}.pages_api")
 
 PASSED = 0
 FAILED = 0
@@ -601,13 +633,27 @@ async def test_end_to_end():
                 "置顶消息里" in (p._last.get(gid, {}).get("reply") or ""), p._last.get(gid))
 
     # --- 用户否定 → 归因 ---
-    before = p.db.state.bandit.group_table(gid)["length"][bandit.BASELINE_INDEX].score
+    # 记下"这次回复到底用了哪一档"——探索时行为仍走基线，但被探索的那一档
+    # 才是变量的真正来源，反馈应当记给它。
+    stored_choice = bandit.Choice.from_dict(p._last.get(gid, {}).get("choice") or {})
+    credited = stored_choice.update_picks()
+    tgt_dim = "length"
+    tgt_level = credited.get(tgt_dim, bandit.BASELINE_INDEX)
+    before = p.db.state.bandit.group_table(gid)[tgt_dim][tgt_level].score
+
     await p.on_user_message(FakeEvent("不对，你说错了", group=gid))
     audits = p.db.recent_audit(gid)
     check("否定被归因并写入审计",
                 len(audits) == 1 and audits[0].polarity == -1, audits)
-    after = p.db.state.bandit.group_table(gid)["length"][bandit.BASELINE_INDEX].score
-    check("负反馈使分数下降", after < before, (before, after))
+    after = p.db.state.bandit.group_table(gid)[tgt_dim][tgt_level].score
+    check("负反馈使被归因档位的分数下降", after < before, (before, after))
+
+    # 回归：归因必须落在「实际起作用的那一档」上，不能丢失未探索维度的目标
+    levels_in_audit = {(u["dimension"], u["level"]) for u in audits[0].updates}
+    expect = {(d, credited.get(d, bandit.BASELINE_INDEX)) for d in bandit.DIMENSIONS}
+    check("审计里的档位与实际使用的策略一致", levels_in_audit == expect,
+                (sorted(levels_in_audit), sorted(expect)))
+
     check("审计记录了当时使用的策略",
                 bool((audits[0].choice or {}).get("picks")), audits[0].choice)
 
@@ -935,6 +981,135 @@ async def test_pending_flow():
 
 
 # ====================================================================== #
+#  10. 配置面板（阶段三）
+# ====================================================================== #
+
+async def test_panel():
+    pages_api = T_pages_api
+    p = new_plugin({"min_samples": 1})
+    gid = "gPANEL"
+    ctx = p.context
+
+    # --- 路由注册 ---
+    check("构造面板时已注册路由", len(ctx.routes) > 0, len(getattr(ctx, "routes", [])))
+    prefixes = {r[0] for r in ctx.routes}
+    check("路由都带插件名前缀",
+                all(x.startswith("/astrbot_plugin_self_evolve/") for x in prefixes), sorted(prefixes))
+    check("注册了必需接口",
+                {"/astrbot_plugin_self_evolve/approve",
+                 "/astrbot_plugin_self_evolve/rollback",
+                 "/astrbot_plugin_self_evolve/group"} <= prefixes, sorted(prefixes))
+
+    web = p.web
+    check("面板控制器实例存在", web is not None, None)
+
+    # --- bootstrap ---
+    boot = await web.api_bootstrap()
+    check("bootstrap 返回配置与维度元信息",
+                "config" in boot and "dimensions" in boot and len(boot["dimensions"]) == 5, list(boot))
+    check("bootstrap 暴露关键参数",
+                boot["config"].get("min_samples") == 1, boot["config"])
+
+    # --- 造点数据，验证 overview / group ---
+    await p.on_llm_request(FakeEvent("问题", group=gid), FakeReq(prompt="问题"))
+    await p.after_message_sent(FakeEvent("", group=gid, result="回答"))
+    await p.on_user_message(FakeEvent("不对", group=gid))
+    p.db.state.memory.add(memory.Entry(content="面板测试经验条目", group_id=gid))
+    p.db.push_snapshot(gid, "面板测试版本")
+
+    ov = await web.api_overview()
+    gids = [g["group_id"] for g in ov["groups"]]
+    check("overview 列出有学习痕迹的群", gid in gids, gids)
+    row = next(g for g in ov["groups"] if g["group_id"] == gid)
+    check("overview 行含关键计数",
+                row["entries_alive"] >= 1 and row["feedback"] >= 1, row)
+
+    WEB_REQ.query = {"group_id": gid}
+    det = await web.api_group()
+    check("group 详情含学习/经验/审计/版本",
+                det["group_id"] == gid and det["dimensions"] and det["entries"]
+                and det["audit"] and det["history"], list(det))
+    check("详情里的经验带失效标记与有效置信度",
+                all("alive" in e and "effective_confidence" in e for e in det["entries"]), None)
+
+    # 缺参数应报错
+    WEB_REQ.query = {}
+    err = await web.api_group()
+    check("缺少 group_id 时返回错误", isinstance(err, dict) and "error" in err, err)
+
+    # --- 审批流 ---
+    p.db.add_pending(store_mod.PendingItem(
+        pid="pPANEL", group_id=gid, created=time.time(), kind="entry",
+        payload={"content": "面板审批候选内容", "kind": "fact", "confidence": 0.7},
+        reason="测试",
+    ))
+    WEB_REQ._json = {"group_id": gid, "ids": ["pPANEL"]}
+    res = await web.api_approve()
+    check("面板可采纳候选", "message" in res and "已采纳" in res["message"], res)
+    check("采纳后进入经验库",
+                any("面板审批候选内容" in e.content for e in p.db.state.memory.entries(gid)), None)
+
+    # 驳回
+    p.db.add_pending(store_mod.PendingItem(
+        pid="pPANEL2", group_id=gid, created=time.time(), kind="entry",
+        payload={"content": "会被驳回的候选", "kind": "fact", "confidence": 0.7}, reason="测试"))
+    WEB_REQ._json = {"group_id": gid, "ids": "all"}
+    res = await web.api_reject()
+    check("面板可驳回候选", "已驳回" in res.get("message", ""), res)
+
+    # --- 删除经验 ---
+    target = p.db.state.memory.entries(gid)[0]
+    WEB_REQ._json = {"group_id": gid, "eid": target.eid}
+    res = await web.api_forget()
+    check("面板可删除经验条目", "已忘记" in res.get("message", ""), res)
+
+    # --- 回滚 ---
+    before_count = len(p.db.snapshots.get(gid, []))
+    WEB_REQ._json = {"group_id": gid}
+    res = await web.api_rollback()
+    check("面板可回滚（不带 sid 时退上一版）",
+                res.get("ok") is True, res)
+    check("回滚不改动版本数量记录", len(p.db.snapshots.get(gid, [])) <= before_count, None)
+
+    # --- 暂停/恢复 ---
+    WEB_REQ._json = {"action": "pause"}
+    res = await web.api_switch()
+    check("面板可暂停学习", res.get("paused") is True, res)
+    check("暂停后 _group_enabled 为假", p._group_enabled(gid) is False, None)
+    WEB_REQ._json = {"action": "resume"}
+    res = await web.api_switch()
+    check("面板可恢复学习", res.get("paused") is False, res)
+    WEB_REQ._json = {"action": "乱填"}
+    res = await web.api_switch()
+    check("非法 action 被拒", isinstance(res, dict) and "error" in res, res)
+
+    # --- 反思接口在无模型时降级 ---
+    WEB_REQ._json = {"group_id": gid}
+    res = await web.api_reflect()
+    check("面板反思在无模型时返回说明而非崩溃",
+                "message" in res, res)
+
+    # --- 导出 ---
+    WEB_REQ.query = {"group_id": gid}
+    res = await web.api_export()
+    check("面板可导出学习数据", res.get("group_id") == gid and "learning" in res, list(res))
+
+    # --- 低版本 AstrBot 降级：没有 register_web_api 时不应抛异常 ---
+    class _NoWeb:
+        pass
+
+    p2 = main_mod.SelfEvolve(_NoWeb(), {"admin_only": False})
+    check("无 register_web_api 时插件仍可实例化", p2 is not None, None)
+    check("此时面板标记为未注册（学习功能不受影响）",
+                p2.web is not None and p2.web.registered is False, p2.web)
+    check("降级时不注册任何路由", len(getattr(p2.context, "routes", [])) == 0, None)
+
+    # 恢复全局 request 状态，避免影响其它用例
+    WEB_REQ.query = {}
+    WEB_REQ._json = {}
+
+
+# ====================================================================== #
 
 async def main():
     await test_feedback()
@@ -946,6 +1121,7 @@ async def main():
     await test_persistence()
     await test_reflection()
     await test_pending_flow()
+    await test_panel()
     print(f"\n结果: {PASSED} 通过, {FAILED} 失败")
     sys.exit(1 if FAILED else 0)
 

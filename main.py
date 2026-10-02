@@ -69,7 +69,7 @@ from .learning import (
 from .learning.feedback import SIG_NONE
 from .store import AuditEntry, LearnStore, PendingItem, _new_id
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 #: 本插件在事件上留下的标记键（命名空间化，避免与其它插件冲突）
 EXTRA_NAMESPACE = "self_evolve"
@@ -122,6 +122,24 @@ class SelfEvolve(Star):
         self._history = {}
         # 自动反思后台任务
         self._reflect_task: asyncio.Task | None = None
+        # 配置面板（WebUI Pages）
+        self.web = None
+        self._register_pages(context)
+
+    def _register_pages(self, context: Context) -> None:
+        """注册 WebUI 配置面板。
+
+        低版本 AstrBot 不支持插件 Pages，此时静默降级，
+        不影响学习与注入功能（阶段一、二完全可用）。
+        """
+        try:
+            from .pages_api import SelfEvolveWeb
+
+            self.web = SelfEvolveWeb(context, self)
+            self.web.register_routes()
+        except Exception as e:
+            logger.warning("[自进化] 配置面板注册失败（不影响学习功能）: %s", e)
+            self.web = None
 
     # ------------------------------------------------------------------ #
     #  配置
@@ -766,6 +784,89 @@ class SelfEvolve(Star):
             if low and low in content:
                 return it
         return None
+
+    # ------------------------------------------------------------------ #
+    #  面板数据（阶段三）
+    # ------------------------------------------------------------------ #
+
+    def _is_paused(self) -> bool:
+        return float(self.db.get_flag("paused_until") or 0) > time.time()
+
+    def _known_groups(self) -> list[str]:
+        """所有有学习痕迹的群（策略表 / 经验库 / 审计 / 待批任一处有数据）。"""
+        gids = set(self.db.state.bandit.table) | set(self.db.state.memory.groups)
+        gids |= set(self.db.audit) | set(self.db.pending) | set(self.db.snapshots)
+        gids |= set(self.db.stats)
+        return sorted(g for g in gids if g)
+
+    def panel_groups(self) -> list[dict]:
+        """面板首页：每个群一行摘要。"""
+        rows: list[dict] = []
+        for gid in self._known_groups():
+            stats = self.db.state.memory.stats(gid)
+            gstats = self.db.group_stats(gid)
+            rows.append({
+                "group_id": gid,
+                "entries_alive": stats.get("alive", 0),
+                "entries_total": stats.get("total", 0),
+                "pending": len(self.db.pending_items(gid, status="pending")),
+                "feedback": int(gstats.get("feedback", 0) or 0),
+                "injections": int(gstats.get("injections", 0) or 0),
+                "replies": int(gstats.get("replies", 0) or 0),
+                "snapshots": len(self.db.snapshots.get(gid, [])),
+                "blocked": int(gstats.get("blocked_injections", 0) or 0),
+                "last_audit": max((a.created for a in self.db.audit.get(gid, [])), default=0),
+            })
+        rows.sort(key=lambda r: r["last_audit"], reverse=True)
+        return rows
+
+    def panel_group_detail(self, gid: str) -> dict:
+        """面板详情：某群学到了什么、为什么、待批什么、有哪些版本。"""
+        mem = self.db.state.memory
+        rows = self.db.state.bandit.explain(gid)
+        entries = []
+        for e in mem.retrieve(gid, "", limit=200, min_score=0.0):
+            entries.append({
+                **e.to_dict(),
+                "effective_confidence": round(
+                    e.effective_confidence(mem.half_life_days), 4),
+                "alive": e.is_alive(mem.half_life_days),
+                "kind_label": KIND_LABEL.get(e.kind, e.kind),
+            })
+        pending = []
+        for it in self.db.pending_items(gid, status="pending"):
+            p = it.payload or {}
+            pending.append({
+                "pid": it.pid,
+                "kind": it.kind,
+                "content": p.get("content", ""),
+                "entry_kind": p.get("kind", ""),
+                "kind_label": KIND_LABEL.get(str(p.get("kind")), str(p.get("kind"))),
+                "confidence": p.get("confidence"),
+                "reason": it.reason,
+                "created": it.created,
+            })
+        audit = [{
+            "aid": a.aid, "created": a.created, "signal": a.signal,
+            "polarity": a.polarity, "weight": a.weight,
+            "user_message": a.user_message, "bot_reply": a.bot_reply,
+            "evidence": a.evidence, "correction": a.correction,
+            "note": a.note, "choice": a.choice, "updates": a.updates,
+        } for a in self.db.recent_audit(gid, limit=50)]
+        history = [{
+            "sid": s.sid, "reason": s.reason, "created": s.created,
+            "summary": s.summary,
+        } for s in self.db.history(gid)]
+        return {
+            "group_id": gid,
+            "stats": {**mem.stats(gid), **self.db.group_stats(gid)},
+            "dimensions": rows,
+            "entries": entries,
+            "pending": pending,
+            "audit": audit,
+            "history": history,
+            "paused": self._is_paused(),
+        }
 
     # ------------------------------------------------------------------ #
     #  命令：单入口 + 子命令（与其它插件命令零冲突）

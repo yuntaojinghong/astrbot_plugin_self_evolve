@@ -1,0 +1,122 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "插件总开关",
+    "hint": "关闭后不注入任何学习结果、也不采集反馈，行为与未安装本插件一致。",
+    "default": true
+  },
+  "inject_enabled": {
+    "type": "bool",
+    "description": "启用注入",
+    "hint": "关闭后仍然继续学习（可在面板观察），但不会把学到的内容注入到对话里。适合先观察一段时间再启用。",
+    "default": true
+  },
+  "learn_in_private": {
+    "type": "bool",
+    "description": "允许在私聊中学习",
+    "hint": "默认只在群聊学习。私聊通常无「群偏好」概念，且会话更私密，建议保持关闭。",
+    "default": false
+  },
+  "inject_max_entries": {
+    "type": "int",
+    "description": "每次注入的经验条数上限",
+    "hint": "按与当前提问的相关度选取。条数越多上下文占用越大，建议 3~6 条。",
+    "default": 5
+  },
+  "inject_max_chars": {
+    "type": "int",
+    "description": "注入正文长度上限（字符）",
+    "hint": "超出即截断，避免污染上下文。建议 400~1200。",
+    "default": 700
+  },
+  "min_samples": {
+    "type": "int",
+    "description": "策略生效所需的最小反馈次数",
+    "hint": "某个风格档位被选中并收到反馈的次数达到该值后才会影响行为；未达标时用默认档位。调大更保守（学得慢但稳），调小见效快但可能被少量反馈带偏。建议 5~10。",
+    "default": 5
+  },
+  "max_offset": {
+    "type": "float",
+    "description": "风格最大偏移比例（硬上限）",
+    "hint": "学到的倾向最多只能在基线上偏移这个比例，0.20 表示 ±20%。这是防止「越学越歪」的硬护栏，不建议超过 0.35。",
+    "default": 0.2
+  },
+  "max_abs": {
+    "type": "float",
+    "description": "单个风格档位的分数上限（硬上限）",
+    "hint": "每次反馈累加的分数被夹在该范围内，保证无论收到多少反馈行为都不会跑飞。",
+    "default": 3.0
+  },
+  "learning_rate": {
+    "type": "float",
+    "description": "学习率",
+    "hint": "每次反馈对分数的调整幅度。越大越快也越容易被单次反馈影响。建议 0.15~0.35。",
+    "default": 0.25
+  },
+  "epsilon": {
+    "type": "float",
+    "description": "探索概率",
+    "hint": "以该概率随机尝试非最优档位，避免过早锁死在某个风格上。0 表示完全按当前最优执行。建议 0.05~0.2。",
+    "default": 0.12
+  },
+  "decay_half_life_days": {
+    "type": "float",
+    "description": "风格反馈衰减半衰期（天）",
+    "hint": "旧的反馈按半衰期变淡，防止被一次风波永久带偏。0 表示不衰减。",
+    "default": 7.0
+  },
+  "memory_half_life_days": {
+    "type": "float",
+    "description": "经验记忆衰减半衰期（天）",
+    "hint": "长期没被再次印证的经验条目置信度会下降，低于阈值后自动停止注入。0 表示不衰减。",
+    "default": 60.0
+  },
+  "max_entries_per_group": {
+    "type": "int",
+    "description": "每群经验条目上限",
+    "hint": "超出后自动淘汰置信度最低的条目（管理员固定的条目不受影响）。",
+    "default": 200
+  },
+  "learn_from_implicit": {
+    "type": "bool",
+    "description": "采集隐式反馈",
+    "hint": "除明确的「谢谢/不对」之外，还从「换个说法重问」「放弃追问」等行为推断。隐式信号噪声较大，权重较低且不单独触发学习；追求稳妥可关闭。",
+    "default": true
+  },
+  "min_signal_weight": {
+    "type": "float",
+    "description": "最低采信权重",
+    "hint": "低于该权重的反馈直接丢弃。默认 0 表示全部采信；设为 0.3 左右可只保留较明确的信号。",
+    "default": 0.0
+  },
+  "feedback_window_sec": {
+    "type": "int",
+    "description": "反馈归因时间窗（秒）",
+    "hint": "只有在这个时间窗内紧接着机器人发言的用户消息才会被当作反馈，避免把很久之后的无关消息算成评价。",
+    "default": 600
+  },
+  "auto_snapshot": {
+    "type": "bool",
+    "description": "自动保存可回滚版本",
+    "hint": "每次学习生效后保存一个版本快照，可用「进化 回滚」退回。关闭后无法回滚，不建议。",
+    "default": true
+  },
+  "enable_commands": {
+    "type": "bool",
+    "description": "启用「进化」命令",
+    "hint": "关闭后不再响应群内的「进化」系列命令（学习仍照常进行）。",
+    "default": true
+  },
+  "admin_only": {
+    "type": "bool",
+    "description": "命令仅管理员可用",
+    "hint": "默认开启。关闭后任何人都能用「进化 状态/记忆」查看本群学到的内容。",
+    "default": true
+  },
+  "list_limit": {
+    "type": "int",
+    "description": "命令列出的条目数上限",
+    "hint": "「进化 记忆」「进化 遗忘」一次展示与编号的最大条目数。",
+    "default": 20
+  }
+}

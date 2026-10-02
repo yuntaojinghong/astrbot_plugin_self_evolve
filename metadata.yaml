@@ -1,0 +1,42 @@
+name: astrbot_plugin_self_evolve
+display_name: 自进化
+short_desc: 从真实互动里学会每个群的说话方式与要记住的事——有界、可解释、可回滚
+desc: >-
+  给机器人加一层「语感与记忆」：它只在**真正调用过模型**的对话里学习
+  （被其它插件拦下的消息不会触发，因此不会把闲聊当素材），把用户对回复的反应
+  （明确的好评/差评/纠正，以及追问、放弃等隐式信号）归因到当时实际使用的回复策略上。
+  回复风格被离散成有限的档位（长度/正式度/表情/温度/直接度），用带**硬上限、样本门槛与
+  时间衰减**的方式学习，样本不足时不影响行为。学到的经验条目按群隔离、可溯源、会衰减，
+  注入前会做净化并拦截疑似提示注入的内容。全部变更都记录「哪句话→什么信号→哪一档加了多少分」，
+  并保存可回滚的版本快照。
+help: >-
+  发送「进化」查看本群学习总览；「进化 记忆」看学到的经验；「进化 审计」看每次调整的依据；
+  「进化 遗忘」删除某条；「进化 回滚」退回上一个版本；「进化 开关 关」暂停学习与注入。
+  命令默认仅管理员可用，可在插件配置面板调整。所有学习都有上限与依据，不会无限制地改变行为。
+version: 0.1.0
+author: yuntaojinghong
+repo: https://github.com/yuntaojinghong/astrbot_plugin_self_evolve
+astrbot_version: ">=4.16,<5"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - wecom
+  - weixin_official_account
+  - lark
+  - dingtalk
+  - discord
+  - slack
+  - kook
+  - vocechat
+  - satori
+  - misskey
+  - line
+  - matrix
+  - mattermost
+tags:
+  - 自学习
+  - 自适应
+  - 个性化
+  - 群聊
+  - 记忆

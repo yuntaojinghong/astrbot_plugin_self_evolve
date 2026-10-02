@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: 回归测试 (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 语法检查
+        run: python -m compileall -q main.py store.py learning tests
+
+      - name: 离线回归测试
+        run: python -X utf8 tests/test_logic.py
+
+      - name: 市场规范检查（logger 只能来自 astrbot.api）
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          bad = []
+          for p in pathlib.Path(".").rglob("*.py"):
+              if "tests" in p.parts or p.name == "_selftest.py":
+                  continue
+              src = p.read_text(encoding="utf-8")
+              if re.search(r"^\s*import logging\s*$", src, re.M) or "logging.getLogger" in src:
+                  bad.append(str(p))
+          if bad:
+              print("以下文件仍在使用 Python 内置 logging（市场审查会拒绝）:", bad)
+              sys.exit(1)
+          print("OK: 未发现标准库 logging 用法")
+          PY
+
+  package:
+    name: 打包校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 构建分发压缩包
+        run: python -X utf8 scripts/build_release.py
+
+      - name: 校验压缩包内容
+        run: |
+          python - <<'PY'
+          import zipfile, sys
+          REQUIRED = {
+              "astrbot_plugin_self_evolve/main.py",
+              "astrbot_plugin_self_evolve/store.py",
+              "astrbot_plugin_self_evolve/metadata.yaml",
+              "astrbot_plugin_self_evolve/_conf_schema.json",
+              "astrbot_plugin_self_evolve/learning/__init__.py",
+              "astrbot_plugin_self_evolve/learning/bandit.py",
+              "astrbot_plugin_self_evolve/learning/feedback.py",
+              "astrbot_plugin_self_evolve/learning/memory.py",
+              "astrbot_plugin_self_evolve/learning/profile.py",
+          }
+          names = set(zipfile.ZipFile("dist/astrbot_plugin_self_evolve.zip").namelist())
+          missing = REQUIRED - names
+          if missing:
+              print("缺少必需文件:", sorted(missing))
+              sys.exit(1)
+          leaked = [n for n in names if n.endswith(".pyc") or "/tests/" in n
+                    or "/scripts/" in n or "/docs/" in n or "/data/" in n]
+          if leaked:
+              print("压缩包包含不应分发的文件:", leaked)
+              sys.exit(1)
+          print(f"OK: {len(names)} 个文件，必需文件齐全")
+          PY
+
+      - name: 上传压缩包（供人工检查）
+        uses: actions/upload-artifact@v4
+        with:
+          name: astrbot_plugin_self_evolve
+          path: dist/astrbot_plugin_self_evolve.zip
+          retention-days: 7

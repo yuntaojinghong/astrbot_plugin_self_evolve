@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 插件运行时写入的学习数据（经验条目 + 策略表 + 审计日志）
+# 可能包含群内对话片段，严禁入库
+self_evolve_state.json
+self_evolve_state.json.tmp
+data/
+
+# 测试临时数据
+.self_evolve_test/
+
+# 打包产物
+dist/
+
+# 临时备份
+*.bak
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

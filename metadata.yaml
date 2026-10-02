@@ -16,6 +16,7 @@ help: >-
 version: 0.3.0
 author: yuntaojinghong
 repo: https://github.com/yuntaojinghong/astrbot_plugin_self_evolve
+social_link: https://yuntaojinghong.github.io/astrbot_plugin_self_evolve/
 astrbot_version: ">=4.16,<5"
 support_platforms:
   - aiocqhttp

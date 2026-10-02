@@ -38,6 +38,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
@@ -51,16 +52,24 @@ from .learning import (
     Entry,
     KIND_CORRECTION,
     KIND_LABEL,
+    SOURCE_ADMIN,
+    SOURCE_REFLECT,
     SOURCE_USER,
+    Candidate,
     Choice,
+    build_prompt,
+    build_transcript,
+    parse_candidates,
     parse_feedback,
     render_injection,
     render_summary,
+    summarize,
+    verify_all,
 )
 from .learning.feedback import SIG_NONE
-from .store import AuditEntry, LearnStore, _new_id
+from .store import AuditEntry, LearnStore, PendingItem, _new_id
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 #: 本插件在事件上留下的标记键（命名空间化，避免与其它插件冲突）
 EXTRA_NAMESPACE = "self_evolve"
@@ -109,6 +118,10 @@ class SelfEvolve(Star):
         self._loaded = False
         # {group_id: {"reply","choice","user_msg","ts","pending"}}
         self._last = {}
+        # {group_id: [{"who","text"}]} 最近互动片段，供反思使用（有上限）
+        self._history = {}
+        # 自动反思后台任务
+        self._reflect_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ #
     #  配置
@@ -135,6 +148,11 @@ class SelfEvolve(Star):
         "min_signal_weight": 0.0,
         "feedback_window_sec": 600,
         "list_limit": 20,
+        "history_limit": 60,
+        "reflect_max_candidates": 5,
+        "reflect_provider_id": "",
+        "auto_reflect": False,
+        "auto_reflect_minutes": 720,
     }
 
     @classmethod
@@ -187,12 +205,63 @@ class SelfEvolve(Star):
     async def initialize(self):
         await self._ensure_loaded()
         logger.info("[自进化] 已加载，学习状态：%s", self._brief())
+        if self._cfg_bool("auto_reflect"):
+            await self.start_auto_reflect()
 
     async def terminate(self):
+        await self.stop_auto_reflect()
         try:
             await self.db.save()
         except Exception as e:
             logger.warning("[自进化] 退出保存失败: %s", e)
+
+    # ------------------------------------------------------------------ #
+    #  自动反思（阶段二）
+    # ------------------------------------------------------------------ #
+
+    async def start_auto_reflect(self) -> None:
+        if self._reflect_task and not self._reflect_task.done():
+            return
+        self._reflect_task = asyncio.create_task(self._auto_reflect_loop())
+        logger.info("[自进化] 自动反思已启动，间隔 %s 分钟",
+                    self._cfg_int("auto_reflect_minutes", 720))
+
+    async def stop_auto_reflect(self) -> None:
+        task = self._reflect_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._reflect_task = None
+
+    async def _auto_reflect_loop(self) -> None:
+        """按间隔为「最近有互动」的群产出待批候选。
+
+        注意：这里只**产出候选**，不会自动生效——生效必须经管理员审批。
+        反思会消耗 token，因此只在确有新互动时才调用。
+        """
+        while True:
+            try:
+                minutes = max(5, self._cfg_int("auto_reflect_minutes", 720) or 720)
+                await asyncio.sleep(minutes * 60)
+                if not self._cfg_bool("enabled") or not self._cfg_bool("auto_reflect"):
+                    continue
+                cutoff = time.time() - minutes * 60
+                for gid, bucket in list(self._history.items()):
+                    if not bucket:
+                        continue
+                    if float(bucket[-1].get("ts") or 0) < cutoff:
+                        continue
+                    if self.db.pending_items(gid, status="pending"):
+                        continue    # 上一次的还没审，先别堆
+                    result = await self.run_reflection(gid)
+                    logger.info("[自进化] 自动反思 %s: %s", gid, result.splitlines()[0])
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("[自进化] 自动反思异常（已忽略）: %s", e)
 
     async def _ensure_loaded(self):
         if self._loaded:
@@ -363,9 +432,20 @@ class SelfEvolve(Star):
             st = self._last.setdefault(gid, {})
             st["reply"] = text[:400]
             st["reply_ts"] = time.time()
+            self._append_history(gid, "bot", text)
             self.db.bump_stat(gid, "replies")
         except Exception as e:
             logger.debug("[自进化] 发送后钩子异常（已忽略）: %s", e)
+
+    def _append_history(self, gid: str, who: str, text: str) -> None:
+        """记录最近互动片段（反思的素材），带条数与单条长度上限。"""
+        if not gid or not text:
+            return
+        bucket = self._history.setdefault(gid, [])
+        bucket.append({"who": who, "text": str(text)[:200], "ts": time.time()})
+        limit = self._cfg_int("history_limit", 60) or 60
+        if len(bucket) > limit:
+            del bucket[: len(bucket) - limit]
 
     @staticmethod
     def _result_text(event) -> str:
@@ -410,6 +490,8 @@ class SelfEvolve(Star):
             text = self._message_text(event)
             if not text:
                 return
+            if not consumed:
+                self._append_history(gid, "user", text)
 
             st = self._last.get(gid) or {}
             prev_reply = str(st.get("reply") or "")
@@ -502,6 +584,190 @@ class SelfEvolve(Star):
         return False
 
     # ------------------------------------------------------------------ #
+    #  反思（阶段二）：让模型复盘，产出候选 → 待批区
+    # ------------------------------------------------------------------ #
+
+    async def _call_reflection(self, prompt: str) -> tuple[str, str]:
+        """调用 AstrBot 已配置的模型做一次复盘。
+
+        Returns:
+            ``(模型输出, 错误说明)``。没有可用模型时输出为空并给出原因。
+        """
+        generate = getattr(self.context, "llm_generate", None)
+        if not callable(generate):
+            return "", "当前 AstrBot 版本不支持 llm_generate，无法反思（学习本身不受影响）"
+        provider_id = str(self._cfg("reflect_provider_id") or "").strip()
+        if not provider_id:
+            try:
+                providers = self.context.get_all_providers() or []
+            except Exception:
+                providers = []
+            if not providers:
+                return "", "没有可用的对话模型，无法反思（可在 AstrBot「服务提供商」里配置）"
+            try:
+                provider_id = getattr(providers[0], "provider_config", {}).get("id", "") or ""
+            except Exception:
+                provider_id = ""
+            if not provider_id:
+                try:
+                    provider_id = str(getattr(providers[0], "meta", lambda: None)() or "")
+                except Exception:
+                    provider_id = ""
+        try:
+            resp = await generate(chat_provider_id=provider_id, prompt=prompt)
+            return str(getattr(resp, "completion_text", "") or ""), ""
+        except TypeError:
+            # 老版本签名不接受关键字
+            try:
+                resp = await generate(provider_id, prompt)
+                return str(getattr(resp, "completion_text", "") or ""), ""
+            except Exception as e:
+                return "", f"调用模型失败：{e}"
+        except Exception as e:
+            return "", f"调用模型失败：{e}"
+
+    def _recent_corrections(self, gid: str) -> list[str]:
+        out = []
+        for a in self.db.recent_audit(gid, limit=40):
+            if a.correction:
+                out.append(a.correction)
+        return out
+
+    async def run_reflection(self, gid: str) -> str:
+        """执行一次反思并把通过的候选放进待批区。返回给用户看的说明。"""
+        transcript = build_transcript(self._history.get(gid, []))
+        if len(transcript) < 20:
+            return "🤔 本群可用的互动片段太少，暂时没什么可复盘的。\n（多聊几轮、或积累一些反馈后再试。）"
+
+        known = [e.content for e in self.db.state.memory.entries(gid)]
+        signals = {k.replace("signal_", ""): v for k, v in self.db.group_stats(gid).items()
+                   if k.startswith("signal_")}
+        prompt = build_prompt(
+            transcript=transcript,
+            corrections=self._recent_corrections(gid),
+            signals=signals,
+            known=known,
+        )
+        raw, err = await self._call_reflection(prompt)
+        if err:
+            return f"⚠️ {err}"
+        cands, note = parse_candidates(raw, limit=self._cfg_int("reflect_max_candidates", 5) or 5)
+        if not cands:
+            return f"🤔 本次反思没有产出可用候选（{note}）。"
+
+        cands = verify_all(cands, store=self.db.state.memory, group_id=gid)
+        accepted = [c for c in cands if c.accepted]
+        self.db.bump_stat(gid, "reflections")
+
+        for c in accepted:
+            self.db.add_pending(PendingItem(
+                pid=_new_id("p"), group_id=gid, created=time.time(),
+                kind="entry",
+                payload={"content": c.content, "kind": c.kind, "confidence": c.confidence},
+                reason=f"反思候选（置信 {c.confidence:.2f}）",
+            ))
+        await self.db.maybe_save()
+
+        lines = ["🧪 反思完成（结果未生效，需审批）", "", summarize(cands), ""]
+        if accepted:
+            lines.append(f"共 {len(accepted)} 条进入待批区。「进化 审批」查看，「进化 通过 <编号>」采纳。")
+        else:
+            lines.append("本次没有候选通过校验（原因见上）。")
+        return "\n".join(lines)
+
+    async def _pending_text(self, gid: str) -> str:
+        items = self.db.pending_items(gid, status="pending")
+        if not items:
+            return ("📭 待批区是空的。\n"
+                    "用「进化 反思」让模型复盘最近的互动，产出值得记住的候选。")
+        lines = ["📥 待批候选（批准后才会生效）"]
+        for i, it in enumerate(items, 1):
+            p = it.payload or {}
+            if it.kind == "entry":
+                label = KIND_LABEL.get(str(p.get("kind")), str(p.get("kind")))
+                lines.append(f"{i}. [{label}] {p.get('content')}")
+                lines.append(f"    置信 {p.get('confidence')} · {it.reason}")
+            else:
+                lines.append(f"{i}. [{it.kind}] {p} —— {it.reason}")
+            lines.append(f"    编号 {it.pid}")
+        lines.append("")
+        lines.append("用法：「进化 通过 <编号>」采纳 /「进化 驳回 <编号>」丢弃 /「进化 通过 全部」")
+        return "\n".join(lines)
+
+    async def _approve_text(self, gid: str, rest: str) -> str:
+        pending = self.db.pending_items(gid, status="pending")
+        if not pending:
+            return "📭 待批区是空的，没有可采纳的候选。"
+        target = (rest or "").strip()
+        if target in ("全部", "all"):
+            chosen = pending
+        else:
+            match = self._pick_pending(pending, target)
+            if match is None:
+                return f"没找到候选「{target}」。用「进化 审批」查看编号。"
+            chosen = [match]
+
+        added, merged = 0, 0
+        for it in chosen:
+            p = it.payload or {}
+            if it.kind == "entry" and p.get("content"):
+                res = self.db.state.memory.add(Entry(
+                    content=str(p["content"]),
+                    kind=str(p.get("kind") or "fact"),
+                    group_id=gid,
+                    confidence=float(p.get("confidence", 0.5) or 0.5),
+                    source=SOURCE_REFLECT,
+                ))
+                added += 1 if res.created else 0
+                merged += 1 if res.merged else 0
+            self.db.resolve_pending(gid, it.pid, "approved")
+
+        if self._cfg_bool("auto_snapshot"):
+            self.db.push_snapshot(gid, f"采纳 {len(chosen)} 条反思候选",
+                                  {"memory": f"+{added}", "merged": merged})
+        self.db.bump_stat(gid, "approved", len(chosen))
+        await self.db.maybe_save()
+        return (f"✅ 已采纳 {len(chosen)} 条候选：新增 {added} 条、与已有条目合并 {merged} 条。\n"
+                "下次对话起生效，可用「进化 回滚」撤销。")
+
+    async def _reject_text(self, gid: str, rest: str) -> str:
+        pending = self.db.pending_items(gid, status="pending")
+        if not pending:
+            return "📭 待批区是空的。"
+        target = (rest or "").strip()
+        if target in ("全部", "all"):
+            chosen = pending
+        else:
+            match = self._pick_pending(pending, target)
+            if match is None:
+                return f"没找到候选「{target}」。用「进化 审批」查看编号。"
+            chosen = [match]
+        for it in chosen:
+            self.db.resolve_pending(gid, it.pid, "rejected")
+        await self.db.maybe_save()
+        return f"🗑 已驳回 {len(chosen)} 条候选。"
+
+    @staticmethod
+    def _pick_pending(pending: list, target: str):
+        """按序号或编号前缀挑一个待批项。"""
+        if not target:
+            return None
+        if target.isdigit():
+            idx = int(target) - 1
+            if 0 <= idx < len(pending):
+                return pending[idx]
+        for it in pending:
+            if it.pid == target or it.pid.endswith(target):
+                return it
+        # 退化为内容片段匹配
+        low = target.lower()
+        for it in pending:
+            content = str((it.payload or {}).get("content") or "").lower()
+            if low and low in content:
+                return it
+        return None
+
+    # ------------------------------------------------------------------ #
     #  命令：单入口 + 子命令（与其它插件命令零冲突）
     # ------------------------------------------------------------------ #
 
@@ -528,6 +794,18 @@ class SelfEvolve(Star):
             return
         if sub in ("审计", "为什么", "why", "audit"):
             yield event.plain_result(self._audit_text(gid))
+            return
+        if sub in ("反思", "reflect"):
+            yield event.plain_result(await self.run_reflection(gid))
+            return
+        if sub in ("审批", "待批", "pending"):
+            yield event.plain_result(await self._pending_text(gid))
+            return
+        if sub in ("通过", "采纳", "approve"):
+            yield event.plain_result(await self._approve_text(gid, rest))
+            return
+        if sub in ("驳回", "拒绝", "reject"):
+            yield event.plain_result(await self._reject_text(gid, rest))
             return
         if sub in ("遗忘", "忘记", "forget"):
             yield event.plain_result(await self._forget_text(gid, rest))
@@ -564,7 +842,10 @@ class SelfEvolve(Star):
         if s.get("blocked_injections"):
             lines.append(f"🛡 已拦截 {s['blocked_injections']} 条可疑经验注入（疑似指令性内容）")
         lines.append("")
-        lines.append("子命令：记忆 / 审计 / 遗忘 / 回滚 / 开关 / 导出 / 重置")
+        lines.append("子命令：记忆 / 审计 / 反思 / 审批 / 遗忘 / 回滚 / 开关 / 导出 / 重置")
+        pending = len(self.db.pending_items(gid, status="pending"))
+        if pending:
+            lines.append(f"📥 有 {pending} 条反思候选待审批（「进化 审批」查看）")
         return "\n".join(lines)
 
     def _memory_text(self, gid: str, query: str) -> str:
@@ -676,6 +957,10 @@ class SelfEvolve(Star):
             "进化              本群学习总览（学到了什么）\n"
             "进化 记忆 [关键词] 查看经验条目\n"
             "进化 审计          最近的反馈归因（我为什么变）\n"
+            "进化 反思          让模型复盘最近互动，产出待批候选\n"
+            "进化 审批          查看待批候选\n"
+            "进化 通过 <编号>   采纳候选（可写「全部」）\n"
+            "进化 驳回 <编号>   丢弃候选（可写「全部」）\n"
             "进化 遗忘 <编号>   删除某条经验\n"
             "进化 回滚          退回上一个版本\n"
             "进化 开关 开|关    暂停/恢复学习与注入\n"
@@ -683,7 +968,7 @@ class SelfEvolve(Star):
             "进化 重置 确认     清空本群学习数据\n"
             "━━━━━━━━━━━━━━\n"
             "说明：本插件只在**真正调用模型**的对话里学习，不抢答、不改身份；\n"
-            "所有调整都有上限、有依据、可回滚。"
+            "所有调整都有上限、有依据、可回滚；反思产出必须审批后才生效。"
         )
 
     # ------------------------------------------------------------------ #

@@ -52,6 +52,16 @@ from .memory import (
     SOURCE_USER,
     similarity as memory_similarity,
 )
+from .reflect import (
+    MAX_CANDIDATES,
+    Candidate,
+    build_prompt,
+    build_transcript,
+    parse_candidates,
+    summarize,
+    verify_all,
+    verify_candidate,
+)
 from .profile import (
     CLOSE_TAG,
     OPEN_TAG,
@@ -79,4 +89,7 @@ __all__ = [
     # profile
     "CLOSE_TAG", "OPEN_TAG", "RenderResult", "is_injectable",
     "render_injection", "render_style", "render_summary",
+    # reflect
+    "MAX_CANDIDATES", "Candidate", "build_prompt", "build_transcript",
+    "parse_candidates", "summarize", "verify_all", "verify_candidate",
 ]

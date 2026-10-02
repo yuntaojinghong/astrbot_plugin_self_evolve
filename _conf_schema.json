@@ -118,5 +118,35 @@
     "description": "命令列出的条目数上限",
     "hint": "「进化 记忆」「进化 遗忘」一次展示与编号的最大条目数。",
     "default": 20
+  },
+  "history_limit": {
+    "type": "int",
+    "description": "保留的互动片段条数",
+    "hint": "每个群在内存里保留多少条最近的问答片段，供「进化 反思」复盘使用。只存内存、不落盘，重启即清空。",
+    "default": 60
+  },
+  "reflect_max_candidates": {
+    "type": "int",
+    "description": "单次反思最多产出候选数",
+    "hint": "限制模型一次能提出多少条候选，避免待批区被刷满。建议 3~8。",
+    "default": 5
+  },
+  "reflect_provider_id": {
+    "type": "string",
+    "description": "反思所用模型 ID（留空=自动选第一个可用模型）",
+    "hint": "留空时自动使用 AstrBot 里第一个可用的对话模型。想用更便宜/更快的模型做反思，可在此填其 provider id。",
+    "default": ""
+  },
+  "auto_reflect": {
+    "type": "bool",
+    "description": "自动反思",
+    "hint": "开启后按下方间隔自动让模型复盘并产出待批候选。注意：反思会额外消耗 token，且产出仍需人工审批才生效。建议先手动用「进化 反思」体验效果再决定。",
+    "default": false
+  },
+  "auto_reflect_minutes": {
+    "type": "int",
+    "description": "自动反思间隔（分钟）",
+    "hint": "仅在「自动反思」开启时生效。默认 720 分钟（12 小时）。",
+    "default": 720
   }
 }

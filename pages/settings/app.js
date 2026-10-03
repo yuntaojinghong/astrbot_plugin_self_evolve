@@ -824,4 +824,45 @@ $("#btnPause").addEventListener("click", () => withBusy(async () => {
   flash((r && r.message) || "已切换");
 }));
 
-loadAll();
+/* ============================ 启动 ============================ */
+
+/* AstrBot 把页面 SDK 的 <script> 注入在 </body> **之前**，而本文件也在 </body> 前，
+ * 所以本脚本执行时 window.AstrBotPluginPage 往往**还没定义**——直接初始化会
+ * 误报"未检测到通信接口"（真实踩过的坑）。
+ *
+ * 因此等页面所有脚本都执行完再启动；万一 SDK 仍未出现（旧版本不注入、
+ * 或请求失败），再重试几次后给出明确提示，并说清是"没等到"还是"没注入"。
+ */
+async function waitForBridge(attempts = 20, intervalMs = 50) {
+  for (let i = 0; i < attempts; i += 1) {
+    const b = bridge();
+    if (b) return b;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return null;
+}
+
+function whenDocumentReady() {
+  if (document.readyState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    window.addEventListener("load", () => resolve(), { once: true });
+  });
+}
+
+async function bootstrap() {
+  await whenDocumentReady();
+  const b = await waitForBridge();
+  if (!b) {
+    // 到这一步说明 SDK 确实没有出现（不是"还没加载"）。
+    showError(
+      NO_BRIDGE +
+      "\n（若你是从插件管理里打开的，请确认 AstrBot 版本 >= 4.24.2 —— " +
+      "更早的版本不会为插件页面注入通信接口。）"
+    );
+    renderPlaceholder();
+    return;
+  }
+  await loadAll();
+}
+
+bootstrap();

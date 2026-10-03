@@ -45,7 +45,9 @@ function assert(label, cond, detail) {
   let crashed = null;
   try {
     window.eval(APP);
-    await new Promise((r) => setTimeout(r, 250));
+    // 前端会先等页面脚本加载完、再给 SDK 一点出现的时间（约 1 秒），
+    // 之后才判定"确实没有通信接口"。所以这里要等够，不能提前断言。
+    await new Promise((r) => setTimeout(r, 1600));
   } catch (e) {
     crashed = e;
   }

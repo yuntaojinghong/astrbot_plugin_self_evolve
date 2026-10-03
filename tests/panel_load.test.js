@@ -70,36 +70,38 @@ const dom = new JSDOM(HTML, {
 
 const { window } = dom;
 
-// 真实 AstrBot 里 SDK 是注入到本页面 window 上的全局对象。
-// 这里额外把 window.parent 做成「一读就抛 SecurityError」，
-// 精确复现 origin 为 "null" 的 sandbox iframe——若前端还去读它，就会暴露。
-Object.defineProperty(window, "AstrBotPluginPage", {
-  configurable: true,
-  value: {
-    async ready() { calls.push(["ready"]); return { isDark: true }; },
-    onContext() {},
-    async apiGet(endpoint, params) { calls.push(["GET", endpoint, params || {}]); return RESPONSES[endpoint]; },
-    async apiPost(endpoint, body) { calls.push(["POST", endpoint, body || {}]); return { message: "ok" }; },
-  },
-});
-
-let securityThrown = false;
-try {
-  Object.defineProperty(window, "parent", {
+// 真实 AstrBot 里 SDK 是以 <script> 注入到本页面 window 上的全局对象，
+// 且注入位置在 </body> **之前** —— 本文件也在 </body> 前，所以
+// **本脚本先执行、SDK 后定义**。这里精确复现该时序：延迟一小会儿再定义。
+// 若前端在脚本执行那一刻就初始化，就会误报"未检测到通信接口"（真实踩过的坑）。
+const SDK_DELAY_MS = 60;
+setTimeout(() => {
+  Object.defineProperty(window, "AstrBotPluginPage", {
     configurable: true,
-    get() {
-      securityThrown = true;
-      const e = new Error(
-        "Failed to read a named property 'AstrBotPluginPage' from 'Window': " +
-        "Blocked a frame with origin \"null\" from accessing a cross-origin frame."
-      );
-      e.name = "SecurityError";
-      throw e;
+    value: {
+      async ready() { calls.push(["ready"]); return { isDark: true }; },
+      onContext() {},
+      async apiGet(endpoint, params) { calls.push(["GET", endpoint, params || {}]); return RESPONSES[endpoint]; },
+      async apiPost(endpoint, body) { calls.push(["POST", endpoint, body || {}]); return { message: "ok" }; },
     },
   });
-} catch (e) {
-  console.log("  (无法改写 window.parent，跳过该模拟)");
-}
+}, SDK_DELAY_MS);
+
+// 把 window.parent 做成「一读就抛 SecurityError」，精确复现 origin 为 "null"
+// 的 sandbox iframe —— 若前端还去读它，就会在这里暴露。
+let securityThrown = false;
+Object.defineProperty(window, "parent", {
+  configurable: true,
+  get() {
+    securityThrown = true;
+    const e = new Error(
+      "Failed to read a named property 'AstrBotPluginPage' from 'Window': " +
+      "Blocked a frame with origin \"null\" from accessing a cross-origin frame."
+    );
+    e.name = "SecurityError";
+    throw e;
+  },
+});
 
 const failures = [];
 function assert(label, cond, detail) {

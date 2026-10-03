@@ -3,6 +3,27 @@
 本文件记录 astrbot_plugin_self_evolve（自进化）的所有重要变更。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] - 2026-10-03
+
+### Fixed
+
+- **面板报「未检测到 AstrBot 页面通信接口」**：AstrBot 把页面 SDK 的 `<script>`
+  注入在 `</body>` **之前**，而 `app.js` 也在 `</body>` 前——于是本脚本**先执行**、
+  SDK **后定义**，脚本末尾那次立即初始化必然读不到 `window.AstrBotPluginPage`，
+  于是误报"没有通信接口"，面板一片空白（只有一行红字）。
+  现在改为**等页面脚本全部执行完再启动**，并给 SDK 一小段时间出现，
+  之后才判定"确实没有"。仍拿不到时，提示里会补一句版本要求。
+
+  > 这次和 0.3.1 那次是两个不同的故障：0.3.1 修的是"去读跨源的
+  > `window.parent` 直接抛 SecurityError"；这次是"读对了对象，但读得太早"。
+
+### Tests
+
+- `panel_load.test.js` 改为**延迟注入 SDK**，精确复现"脚本先执行、SDK 后定义"
+  的真实时序。已验证该用例在 0.4.0 的代码上失败、报出的正是用户看到的那句话，
+  在修复后通过（旧失败 / 新通过，双向验证）。
+- `panel_no_bridge.test.js` 相应放宽等待时间（前端现在会先等约 1 秒再判定）。
+
 ## [0.4.0] - 2026-10-03
 
 ### Changed

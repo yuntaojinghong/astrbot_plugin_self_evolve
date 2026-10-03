@@ -1,6 +1,12 @@
 /* 自进化 · 配置面板
- * 只做「查看 / 审批 / 回滚」——不提供直接修改策略分数的入口，
- * 因为分数来自学习。要人工干预请用经验条目与版本回滚。 */
+ *
+ * 三件事都在这一个页面里完成，不必再跳到 AstrBot 原生配置页：
+ *   1. 全局设置：分组表单 + 一键预设 + 风险提示 + 改动预览，直接写回配置
+ *   2. 学习结果：每个群学到了什么、为什么（含注入内容预览）
+ *   3. 审批与回滚：反思候选审批、经验删除、版本回退
+ *
+ * 刻意**不提供**直接修改策略分数的入口——分数来自学习，手改会破坏"可解释"。
+ * 要人工干预请用经验条目与版本回滚。 */
 
 const state = {
   groups: [],
@@ -8,6 +14,10 @@ const state = {
   detail: null,
   tab: "learned",
   busy: false,
+  settings: null,    // /config 返回的描述（分组/预设/当前值）
+  draft: {},         // 未保存的改动
+  probe: "",         // 预览用的探测语句
+  preview: null,
 };
 
 /* ============================ 基础设施 ============================ */
@@ -203,6 +213,11 @@ function renderPlaceholder() {
   box.append(el("div", { class: "placeholder" }, [
     el("div", { class: "placeholder-icon", text: "🧠" }),
     el("p", { text: "从左侧选择一个群，查看它学到了什么。" }),
+    el("button", {
+      class: "btn primary",
+      text: "⚙ 全局设置",
+      onClick: () => openSettings(),
+    }),
   ]));
 }
 
@@ -449,6 +464,281 @@ function renderHistory(d) {
   return wrap;
 }
 
+/* ============================ 全局设置 ============================ */
+/* 配置直接写在面板里：分组表单 + 一键预设 + 风险提示 + 改动预览。
+ * 后端用 _conf_schema.json 当白名单与类型约束，所以这里只管展示与收集。 */
+
+async function openSettings() {
+  state.current = null;
+  state.tab = "settings";
+  renderGroups();
+  try {
+    state.settings = await apiGet("config");
+    state.draft = {};
+    renderSettings();
+  } catch (e) {
+    showError(String(e.message || e));
+  }
+}
+
+function draftValue(field) {
+  return Object.prototype.hasOwnProperty.call(state.draft, field.key)
+    ? state.draft[field.key]
+    : field.value;
+}
+
+function isDirty(field) {
+  return Object.prototype.hasOwnProperty.call(state.draft, field.key)
+    && JSON.stringify(state.draft[field.key]) !== JSON.stringify(field.value);
+}
+
+function renderSettings() {
+  const s = state.settings;
+  const box = $("#content");
+  box.innerHTML = "";
+  if (!s) return;
+
+  const dirtyCount = allFields().filter(isDirty).length;
+
+  box.append(el("div", { class: "panel-head" }, [
+    el("div", {}, [
+      el("h2", { text: "⚙ 全局设置" }),
+      el("p", {
+        class: "sub",
+        text: dirtyCount
+          ? `${dirtyCount} 项已改动，尚未保存`
+          : "改完点右下角「保存」即可生效，不必重载插件",
+      }),
+    ]),
+    el("button", { class: "btn", text: "返回列表", onClick: () => { state.tab = "learned"; renderPlaceholder(); } }),
+  ]));
+
+  if (!s.writable) {
+    box.append(el("div", { class: "alert info" }, [
+      el("span", { text: "⚠ 读不到 _conf_schema.json，本页只能查看当前值、无法保存。请确认插件文件完整。" }),
+    ]));
+  }
+
+  // ---- 一键预设 ----
+  const presets = el("div", { class: "preset-grid" });
+  for (const p of s.presets || []) {
+    presets.append(el("button", {
+      class: "preset",
+      onClick: () => applyPreset(p),
+    }, [
+      el("strong", { text: p.label }),
+      el("span", { text: p.desc }),
+    ]));
+  }
+  box.append(el("div", { class: "card" }, [
+    el("div", { class: "card-head" }, [
+      el("strong", { text: "一键预设" }),
+      el("span", { class: "grow" }),
+      el("span", { class: "card-meta", text: "不改文件、只填入表单，确认后再保存" }),
+    ]),
+    presets,
+  ]));
+
+  // ---- 分组表单 ----
+  for (const group of s.groups || []) {
+    const body = el("div", { class: "fields" });
+    for (const field of group.fields) body.append(renderField(field));
+    const groupDirty = group.fields.filter(isDirty).length;
+    box.append(el("div", { class: "card" }, [
+      el("div", { class: "card-head" }, [
+        el("strong", { text: group.label }),
+        groupDirty ? el("span", { class: "tag warn", text: `${groupDirty} 项改动` }) : null,
+        el("span", { class: "grow" }),
+        el("span", { class: "card-meta", text: group.desc || "" }),
+      ]),
+      body,
+    ]));
+  }
+
+  // ---- 底部操作条 ----
+  box.append(el("div", { class: "sticky-actions" }, [
+    el("span", { class: "card-meta", text: dirtyCount ? `${dirtyCount} 项待保存` : "没有改动" }),
+    el("span", { class: "grow" }),
+    el("button", {
+      class: "btn", text: "丢弃改动",
+      onClick: () => { state.draft = {}; renderSettings(); },
+    }),
+    el("button", {
+      class: "btn primary", text: "保存",
+      onClick: doSaveConfig,
+    }),
+  ]));
+
+  renderPreviewCard(box);
+}
+
+function allFields() {
+  const out = [];
+  for (const g of (state.settings && state.settings.groups) || []) {
+    for (const f of g.fields) out.push(f);
+  }
+  return out;
+}
+
+function applyPreset(preset) {
+  const byKey = {};
+  for (const f of allFields()) byKey[f.key] = f;
+  for (const [key, value] of Object.entries(preset.values || {})) {
+    if (byKey[key]) state.draft[key] = value;
+  }
+  renderSettings();
+  flash(`已套用预设「${preset.label}」，确认无误后点保存`);
+}
+
+function renderField(field) {
+  const value = draftValue(field);
+  const dirty = isDirty(field);
+  const row = el("div", { class: "field" + (dirty ? " dirty" : "") });
+
+  const head = el("div", { class: "field-head" }, [
+    el("strong", { text: field.label }),
+    el("code", { class: "key", text: field.key }),
+    field.risk === "caution" ? el("span", { class: "tag warn", text: "需谨慎" }) : null,
+    field.min !== undefined && field.min !== null
+      ? el("span", { class: "card-meta", text: `${field.min} ~ ${field.max}` }) : null,
+    el("span", { class: "grow" }),
+    dirty ? el("button", {
+      class: "btn tiny", text: "还原",
+      onClick: () => { delete state.draft[field.key]; renderSettings(); },
+    }) : null,
+  ]);
+  row.append(head);
+
+  const input = el("div", { class: "field-input" });
+  if (field.type === "bool") {
+    input.append(el("label", { class: "switch" }, [
+      el("input", {
+        type: "checkbox",
+        checked: value ? true : false,
+        onChange: (e) => setDraft(field, e.target.checked),
+      }),
+      el("span", { text: value ? "开启" : "关闭" }),
+    ]));
+  } else if (field.type === "int" || field.type === "float") {
+    const num = el("input", {
+      type: "number",
+      class: "input",
+      value: value === undefined || value === null ? "" : String(value),
+      step: field.type === "float" ? "0.01" : "1",
+      onInput: (e) => {
+        const raw = e.target.value;
+        setDraft(field, raw === "" ? "" : Number(raw), true);
+      },
+    });
+    if (field.min !== undefined && field.min !== null) num.setAttribute("min", field.min);
+    if (field.max !== undefined && field.max !== null) num.setAttribute("max", field.max);
+    input.append(num);
+  } else {
+    input.append(el("input", {
+      type: "text", class: "input", value: value === undefined || value === null ? "" : String(value),
+      onInput: (e) => setDraft(field, e.target.value, true),
+    }));
+  }
+  row.append(input);
+
+  if (field.hint) row.append(el("p", { class: "hint", text: field.hint }));
+  return row;
+}
+
+function setDraft(field, value, rerenderHead) {
+  state.draft[field.key] = value;
+  if (rerenderHead) {
+    // 输入过程中不整体重绘，否则光标会跳；只更新样式与计数
+    const dirtyCount = allFields().filter(isDirty).length;
+    const sub = document.querySelector(".panel-head .sub");
+    if (sub) sub.textContent = dirtyCount ? `${dirtyCount} 项已改动，尚未保存` : "改完点右下角「保存」即可生效，不必重载插件";
+    const bar = document.querySelector(".sticky-actions .card-meta");
+    if (bar) bar.textContent = dirtyCount ? `${dirtyCount} 项待保存` : "没有改动";
+  } else {
+    renderSettings();
+  }
+}
+
+async function doSaveConfig() {
+  const dirty = {};
+  for (const f of allFields()) if (isDirty(f)) dirty[f.key] = state.draft[f.key];
+  if (!Object.keys(dirty).length) {
+    flash("没有需要保存的改动");
+    return;
+  }
+  return withBusy(async () => {
+    const r = await apiPost("config", { values: dirty });
+    state.settings = await apiGet("config");
+    state.draft = {};
+    renderSettings();
+    const parts = [r.message || "已保存"];
+    if (r.rejected && r.rejected.length) parts.push(`被拒绝：${r.rejected.join("；")}`);
+    flash(parts.join(" · "));
+  });
+}
+
+/* ---------------- 注入预览：面板最实用的一块 ---------------- */
+
+function renderPreviewCard(box) {
+  const gid = (state.groups[0] && state.groups[0].group_id) || state.probeGroup || "";
+  const card = el("div", { class: "card" });
+  card.append(el("div", { class: "card-head" }, [
+    el("strong", { text: "🔍 注入预览" }),
+    el("span", { class: "grow" }),
+    el("span", { class: "card-meta", text: "看看学习结果最终以什么样子进入对话" }),
+  ]));
+
+  const gsel = el("select", { class: "input" });
+  for (const g of state.groups) {
+    gsel.append(el("option", { value: g.group_id, text: g.group_id, selected: g.group_id === gid }));
+  }
+  if (!state.groups.length) gsel.append(el("option", { value: "", text: "（还没有群数据）" }));
+
+  const probe = el("input", {
+    type: "text", class: "input", placeholder: "输入一句群友可能会说的话（可留空）",
+    value: state.probe,
+    onInput: (e) => { state.probe = e.target.value; },
+  });
+
+  card.append(el("div", { class: "preview-controls" }, [
+    gsel, probe,
+    el("button", { class: "btn", text: "预览", onClick: doPreview }),
+  ]));
+
+  if (state.preview) {
+    const p = state.preview;
+    if (!p.active) {
+      card.append(el("div", { class: "alert info" }, [
+        el("span", { text: "当前未启用注入（总开关或「启用注入」是关闭的），所以实际不会注入任何内容。" }),
+      ]));
+    }
+    card.append(el("p", { class: "card-meta", text: `当前策略：${p.choice_desc}${p.fallback ? "（证据不足，走默认档）" : ""}` }));
+    if (p.style_notes && p.style_notes.length) {
+      card.append(el("p", { class: "card-meta", text: `风格指令：${p.style_notes.join("；")}` }));
+    }
+    if (p.blocked && p.blocked.length) {
+      card.append(el("div", { class: "alert info" }, [
+        el("span", { text: `🛡 有 ${p.blocked.length} 条经验因疑似指令性内容被拦截，未注入` }),
+      ]));
+    }
+    card.append(el("pre", { class: "preview-box", text: p.text || "（本次没有可注入的内容）" }));
+  }
+  box.append(card);
+}
+
+async function doPreview() {
+  const gsel = document.querySelector(".preview-controls select");
+  const gid = gsel ? gsel.value : "";
+  if (!gid) {
+    flash("还没有群数据，先让机器人在群里聊几轮");
+    return;
+  }
+  return withBusy(async () => {
+    state.preview = await apiPost("preview", { group_id: gid, message: state.probe });
+    renderSettings();
+  });
+}
+
 /* ============================ 动作 ============================ */
 
 async function withBusy(fn) {
@@ -523,6 +813,8 @@ function doReflect() {
 /* ============================ 事件绑定 ============================ */
 
 $("#btnReload").addEventListener("click", () => withBusy(loadAll));
+
+$("#btnSettings").addEventListener("click", () => withBusy(openSettings));
 
 $("#btnPause").addEventListener("click", () => withBusy(async () => {
   const paused = !!(state.boot && state.boot.paused);

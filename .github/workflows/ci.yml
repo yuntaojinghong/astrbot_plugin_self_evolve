@@ -46,6 +46,9 @@ jobs:
       - name: 离线回归测试
         run: python -X utf8 tests/test_logic.py
 
+      - name: 面板设置端到端测试
+        run: python -X utf8 tests/test_settings.py
+
       - name: 面板前端加载测试（jsdom）
         run: |
           npm install --no-save --no-audit --no-fund jsdom

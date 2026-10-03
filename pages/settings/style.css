@@ -167,7 +167,56 @@ html, body {
 .signal.pos { filter: none; }
 .signal.neg { filter: none; }
 
+/* ---------------- 全局设置表单 ---------------- */
+.preset-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 9px; }
+.preset {
+  text-align: left; cursor: pointer; padding: 11px 13px; border-radius: 9px;
+  background: #18202e; border: 1px solid var(--line); color: var(--fg);
+  display: flex; flex-direction: column; gap: 4px; transition: .15s;
+}
+.preset:hover { border-color: #3d4760; transform: translateY(-1px); }
+.preset strong { font-size: 13.5px; }
+.preset span { font-size: 11.5px; color: var(--faint); line-height: 1.6; }
+
+.fields { display: flex; flex-direction: column; gap: 3px; }
+.field { padding: 9px 11px; border-radius: 8px; border: 1px solid transparent; }
+.field.dirty { background: #1b2434; border-color: #33507f; }
+.field-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.field-head strong { font-size: 13.5px; }
+.field-head .key {
+  font-size: 11px; background: #1e2634; border: 1px solid var(--line);
+  color: var(--faint); padding: 0 5px; border-radius: 4px;
+}
+.field-input { margin-top: 6px; }
+.input {
+  width: 100%; max-width: 320px; background: #10161f; color: var(--fg);
+  border: 1px solid var(--line); border-radius: 7px; padding: 6px 9px; font-size: 13px;
+  font-family: inherit;
+}
+.input:focus { outline: none; border-color: var(--accent); }
+select.input { cursor: pointer; }
+.switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+.switch input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+
+.sticky-actions {
+  position: sticky; bottom: 0; display: flex; align-items: center; gap: 9px;
+  margin-top: 14px; padding: 11px 13px; border-radius: 10px;
+  background: rgba(15, 20, 28, .94); border: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+}
+
+/* ---------------- 注入预览 ---------------- */
+.preview-controls { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+.preview-controls .input { max-width: 220px; }
+.preview-box {
+  background: #0e141d; border: 1px solid var(--line); border-radius: 8px;
+  padding: 12px; margin: 10px 0 0; font-size: 12.5px; line-height: 1.75;
+  white-space: pre-wrap; word-break: break-word; color: #c9d8ef;
+  max-height: 320px; overflow-y: auto;
+}
+
 @media (max-width: 760px) {
   .app { flex-direction: column; }
   .sidebar { width: 100%; flex: none; max-height: 44vh; }
+  .input { max-width: 100%; }
 }

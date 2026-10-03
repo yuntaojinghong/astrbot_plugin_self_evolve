@@ -68,6 +68,10 @@ class SelfEvolveWeb:
             ("/switch", self.api_switch, ["POST"], "暂停/恢复学习"),
             ("/reflect", self.api_reflect, ["POST"], "立即执行一次反思"),
             ("/export", self.api_export, ["GET"], "导出某群学习数据"),
+            # 面板内改配置：省掉「面板 / AstrBot 原生配置页」来回跳
+            ("/config", self.api_config_get, ["GET"], "读取可配置项与当前值"),
+            ("/config", self.api_config_set, ["POST"], "写入配置改动"),
+            ("/preview", self.api_preview, ["POST"], "预览实际会注入的内容"),
         ]
 
         ok = 0
@@ -197,6 +201,52 @@ class SelfEvolveWeb:
         if not gid:
             return _err("缺少参数 group_id", 400)
         return _ok(self.plugin.db.export_group(gid))
+
+    # ------------------------------------------------------------------
+    #  配置：面板内直接改，不必再跳到 AstrBot 原生配置页
+    # ------------------------------------------------------------------
+    async def api_config_get(self):
+        await self.plugin._ensure_loaded()
+        return _ok(self.plugin.config_service.describe())
+
+    async def api_config_set(self):
+        payload = await _json_body()
+        values = payload.get("values")
+        if not isinstance(values, dict) or not values:
+            return _err("缺少参数 values（对象）", 400)
+        result = await self.plugin.config_service.apply_async(values)
+        # 改完配置要让插件按新参数刷新运行时组件（学习率、硬上限、半衰期
+        # 这些是构造时读进实例的）。刷新失败**必须**报出来，
+        # 否则用户会以为"保存成功、已生效"，实际还在用旧参数跑。
+        if result.get("changed"):
+            try:
+                self.plugin.reload_runtime_config()
+                result["applied"] = True
+            except Exception as e:
+                logger.error("[自进化] 配置已保存但运行时刷新失败: %s", e)
+                result["applied"] = False
+                result["message"] = (
+                    f"{result.get('message', '')}；但运行时刷新失败，"
+                    f"请在插件管理里重载插件后重试（{e}）"
+                )
+        return _ok(result)
+
+    async def api_preview(self):
+        """预览：给定群与一句话，实际会被注入什么。
+
+        这是面板相对「只看配置项」的价值——用户能直接看到学习结果最终以
+        什么样子进入对话，而不是靠猜参数含义。
+        """
+        payload = await _json_body()
+        gid = str(payload.get("group_id") or "")
+        probe = str(payload.get("message") or "")
+        if not gid:
+            return _err("缺少参数 group_id", 400)
+        try:
+            return _ok(self.plugin.preview_injection(gid, probe))
+        except Exception as e:
+            logger.exception("[自进化] 生成注入预览失败")
+            return _err(f"生成预览失败: {e}", 500)
 
 
 # ======================================================================

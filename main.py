@@ -67,9 +67,10 @@ from .learning import (
     verify_all,
 )
 from .learning.feedback import SIG_NONE
+from .config_service import ConfigService
 from .store import AuditEntry, LearnStore, PendingItem, _new_id
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 #: 本插件在事件上留下的标记键（命名空间化，避免与其它插件冲突）
 EXTRA_NAMESPACE = "self_evolve"
@@ -95,7 +96,12 @@ except Exception:  # TextPart 不可用时退化为「不注入」，而不是�
 class SelfEvolve(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
-        self.config = self._merge_config(config)
+        # 保留 AstrBot 传入的**原始配置对象**，不要替换成新 dict：
+        # 面板要就地改它并调 save_config() 才能持久化（替换掉就没有那个方法了）。
+        # 缺省值由 _cfg() 在读取时兜底，因此这里不需要预先合并。
+        self._raw_config = config
+        self.config = config if isinstance(config, dict) else self._merge_config(config)
+        self.config_service = ConfigService(self)
         self.data_dir = self._resolve_data_dir()
         path = os.path.join(self.data_dir, "self_evolve_state.json")
         self.db = LearnStore(
@@ -207,6 +213,69 @@ class SelfEvolve(Star):
             return float(self._cfg(key))
         except (TypeError, ValueError):
             return default
+
+    # ------------------------------------------------------------------ #
+    #  配置读取 / 重载（面板内改配置用）
+    # ------------------------------------------------------------------ #
+
+    def plugin_dir(self) -> str:
+        """插件所在目录（_conf_schema.json 在这里）。"""
+        return os.path.dirname(os.path.abspath(__file__))
+
+    def reload_runtime_config(self) -> None:
+        """按当前配置更新运行时组件参数。
+
+        学习率、硬上限、半衰期、容量这些是在组件**构造时**读进实例的，
+        所以面板改完配置必须刷新，否则要等重载插件才生效。
+
+        这里**不吞异常**：刷新失败必须让面板看到，否则用户会以为
+        "保存成功、已生效"，实际还在用旧参数跑。曾因为吞掉异常
+        （用了个不存在的序列化方法）导致配置改了却静默无效。
+        """
+        self.db.rebuild(
+            bandit_kwargs={
+                "max_abs": self._cfg_float("max_abs", 3.0),
+                "max_offset": self._cfg_float("max_offset", 0.20),
+                "learning_rate": self._cfg_float("learning_rate", 0.25),
+                "epsilon": self._cfg_float("epsilon", 0.12),
+                "min_samples": self._cfg_int("min_samples", 5),
+                "decay_half_life": self._cfg_float("decay_half_life_days", 7.0) * 86400,
+            },
+            memory_kwargs={
+                "max_per_group": self._cfg_int("max_entries_per_group", 200),
+                "half_life_days": self._cfg_float("memory_half_life_days", 60.0),
+            },
+        )
+
+    def preview_injection(self, gid: str, probe: str = "") -> dict:
+        """预览：给这个群 + 这句话，实际会注入什么。
+
+        让用户直接看到"学习结果长什么样"，而不是靠猜参数含义。
+        """
+        mem = self.db.state.memory
+        choice = self.db.state.bandit.choose(gid)
+        entries = mem.retrieve(gid, probe, limit=self._cfg_int("inject_max_entries", 5))
+        result = render_injection(
+            entries=entries,
+            choice=choice,
+            max_chars=self._cfg_int("inject_max_chars", DEFAULT_MAX_INJECT),
+        )
+        return {
+            "group_id": gid,
+            "probe": probe,
+            "active": self._cfg_bool("enabled") and self._cfg_bool("inject_enabled"),
+            "choice": choice.to_dict(),
+            "choice_desc": choice.describe(),
+            "fallback": choice.fallback,
+            "entries": [
+                {"eid": e.eid, "content": e.content, "kind": e.kind,
+                 "confidence": round(e.effective_confidence(mem.half_life_days), 3)}
+                for e in entries
+            ],
+            "blocked": result.blocked,
+            "style_notes": result.style_notes,
+            "text": result.text,
+        }
 
     def _resolve_data_dir(self) -> str:
         try:

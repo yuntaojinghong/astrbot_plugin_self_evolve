@@ -254,6 +254,30 @@ class LearnStore:
         self.stats: dict = {}
         self._loaded = False
 
+    # ---------- 配置热更新 ---------- #
+
+    def rebuild(self, *, bandit_kwargs: dict | None = None,
+                memory_kwargs: dict | None = None) -> None:
+        """按新配置更新策略表与经验库的参数，**保留全部已有数据**。
+
+        面板改「学习率 / 硬上限 / 半衰期 / 每群上限」这类参数后必须重建：
+        这些值是在 :class:`LearningState` 构造时读进实例的。
+
+        这里**就地更新参数**，而不是 new 一个新实例再把数据灌回去：
+        后者要依赖完整的序列化往返，一旦序列化接口对不上就会静默失败
+        （曾经用了一个不存在的 ``to_dict``，导致重建静默无效、
+        改完配置看起来"保存成功"其实没生效）。
+        就地更新的另一个好处是学习数据全程留在内存里，不经过有损转换。
+        """
+        bandit = self.state.bandit
+        for key, value in (bandit_kwargs or {}).items():
+            if hasattr(bandit, key):
+                setattr(bandit, key, value)
+        memory = self.state.memory
+        for key, value in (memory_kwargs or {}).items():
+            if hasattr(memory, key):
+                setattr(memory, key, value)
+
     # ---------- 读写 ---------- #
 
     async def load(self) -> None:

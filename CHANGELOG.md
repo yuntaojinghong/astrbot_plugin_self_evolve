@@ -3,6 +3,52 @@
 本文件记录 astrbot_plugin_self_evolve（自进化）的所有重要变更。
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.0] - 2026-10-03
+
+### Fixed
+
+- **学习痕迹一直是 0，面板始终空白**
+
+  两个独立原因，都会让学习停摆。
+
+  `_is_consumed()` 把 `event.is_stopped()` 当成「已被别的插件消费」。但 AstrBot 对
+  不需要机器人回复的普通群消息本来就会 `stop_event()`，含义是「这条不用走 LLM」，
+  并不是「别的插件处理过了」。而这类不 @ 机器人的跟进（「哈哈哈」「好」）正是隐式反馈
+  的主要来源，于是最该学的素材被全部丢弃。现在只认伙伴插件显式留下的标记。
+
+  实测同一条「哈哈哈」，事件未 stop 时能记录反馈，被 stop 后记录数为 0；连喂六条
+  为 6 比 0。
+
+  `on_llm_request` 在 `inject_enabled=False` 时直接返回，连 `_remember_choice()`
+  都不执行，`pending` 永远不置位，`on_user_message` 在
+  `if consumed or not prev_reply or not pending` 处返回。而配置项对该开关的说明是
+  「关闭后仍然继续学习，只是不注入」，与实际行为相反。现在把「选策略并记为待归因」
+  和「是否注入」分开。
+
+- **面板删不掉会话**
+
+  后端只有 `/forget`（删除单条经验），没有清空某个群的接口。已有的 `reset_group()`
+  也不清 `stats`，而 `_known_groups()` 把 `stats` 算进「有学习痕迹的群」，
+  删完刷新这一行会回来。
+
+  现在 `reset_group()` 一并清 `stats` 与按群暂停标记，新增 `POST /reset_group` 接口，
+  面板每行加删除按钮。列表项最外层由 `<button>` 改为 `<div>`，避免删除按钮嵌套在
+  按钮内。删除使用页面内自绘确认框，不依赖 iframe 的 `allow-modals` 权限。
+
+### Changed
+
+- `group-item` 由单个按钮改为容器，内部为详情按钮与删除按钮。
+
+### Tests
+
+- 新增 `test_learning_continues_when_injection_disabled`：关闭注入时仍须记录待归因
+  状态并捕获反馈。
+- 新增 `test_no_strategy_effect_before_min_samples`：固定「短样本内风格偏移为 0」这一
+  事实。`min_samples` 默认 5，门槛是每个风格档位各自累积 5 次反馈；ε-greedy 多数
+  时候选当前最优档位，而初始最优就是基线档，因此基线样本涨得最快，其它档位长期停在
+  0~2。实测 16 条真实反馈后 25 个档位里只有 5 个达标，且选中的都是基线。
+- 改写 `is_stopped` 用例：由「必须跳过」改为「必须照常学习」。原用例断言的是错误行为。
+
 ## [0.4.1] - 2026-10-03
 
 ### Fixed

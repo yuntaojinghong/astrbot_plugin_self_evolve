@@ -464,14 +464,36 @@ class LearnStore:
             del bucket[: len(bucket) - limit]
 
     def reset_group(self, group_id: str) -> dict:
-        """彻底清空某群的学习数据（含历史与审计）。"""
+        """彻底清空某群的学习数据（含历史、审计、统计与暂停标记）。
+
+        .. important::
+            必须把 ``stats`` 也清掉。``_known_groups()`` 会把
+            ``set(self.db.stats)`` 算进「有学习痕迹的群」，所以只清
+            memory/bandit/audit/pending 的话，**面板删掉这一行、下次刷新它又回来**
+            —— 用户看到的就是「会话删不掉」。
+            同理，按群暂停标记也要一起清，否则新数据一进来就是暂停状态。
+        """
         gid = str(group_id or "")
         n_mem = self.state.memory.reset_group(gid)
         self.state.bandit.reset_group(gid)
         n_snap = len(self.snapshots.pop(gid, []))
         n_audit = len(self.audit.pop(gid, []))
         n_pending = len(self.pending.pop(gid, []))
-        return {"memory": n_mem, "snapshots": n_snap, "audit": n_audit, "pending": n_pending}
+        n_stats = len(self.stats.pop(gid, {}) or {})
+        # 按群暂停标记：删完再学不该还是暂停态
+        n_flags = 0
+        for key in (f"paused_until:{gid}", f"paused:{gid}"):
+            if key in self.flags:
+                self.flags.pop(key, None)
+                n_flags += 1
+        return {
+            "memory": n_mem,
+            "snapshots": n_snap,
+            "audit": n_audit,
+            "pending": n_pending,
+            "stats": n_stats,
+            "flags": n_flags,
+        }
 
     def bump_stat(self, group_id: str, key: str, delta: int = 1) -> None:
         gid = str(group_id or "")

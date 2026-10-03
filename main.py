@@ -393,11 +393,22 @@ class SelfEvolve(Star):
         return bool(me) and sid == me
 
     def _is_consumed(self, event) -> bool:
-        """消息是否已被其它插件消费（磐石/树洞等）。
+        """消息是否已被**其它插件**消费（磐石/树洞等），因而不适合当学习素材。
 
-        读取伙伴插件可能留下的标记；读不到时退回 AstrBot 内置信号：
-        ``is_stopped()`` 与 ``should_call_llm(False)``。
-        探测失败一律返回 False（宁可不判，也不误判导致漏学）。
+        .. important::
+            这里**不能**用 ``is_stopped()`` 来判断。
+
+            AstrBot 对「不需要机器人回复的普通群消息」本来就会 ``stop_event()``
+            —— 那是它的正常流程，含义是"这条不用走 LLM"，**不是**"别的插件
+            处理过了"。而这类不 @ 机器人的跟进（「哈哈哈」「好」「+1」）
+            恰恰是隐式反馈最主要的来源。
+
+            实测：同一条「哈哈哈」，事件未 stop 时捕获到 feedback=1，
+            被 stop 后捕获 0；连喂 6 条则 6 : 0。也就是说旧逻辑把最常见的
+            学习素材全部丢掉了 —— 用户看到的就是「装了几天什么都没捕捉到」。
+
+            现在只认**伙伴插件显式留下的标记**；读不到就返回 False
+            （宁可不判，也不误判导致漏学）。
         """
         get_extra = getattr(event, "get_extra", None)
         if callable(get_extra):
@@ -407,11 +418,6 @@ class SelfEvolve(Star):
                         return True
                 except Exception:
                     pass
-        try:
-            if hasattr(event, "is_stopped") and event.is_stopped():
-                return True
-        except Exception:
-            pass
         return False
 
     def _group_enabled(self, group_id: str) -> bool:
@@ -434,28 +440,49 @@ class SelfEvolve(Star):
         注意：本钩子只在**真的要调用模型**时触发。被其它插件拦下的消息
         （磐石意图闸门、树洞私聊静默）不会走到这里，因此本插件天然只从
         真正消耗过 token 的交互里学习。
+
+        .. important::
+            **「选策略并记为待归因」与「是否注入」必须解耦。**
+
+            此前 ``inject_enabled=False`` 时本方法直接 return，连
+            ``_remember_choice()`` 都不执行 —— 于是 ``pending`` 永远不置位，
+            ``on_user_message`` 在 `not pending` 处直接返回，**学习彻底停止**。
+            而面板对这个开关的说明是「关闭后仍然继续学习（可在面板观察），
+            只是不注入」，与实际行为完全相反。用户看到的正是
+            「装了半天捕捉不到任何东西」。
+
+            现在：无论是否注入，都先记录本次选用的策略；
+            只有「把内容塞进请求」这一步受 ``inject_enabled`` 控制。
         """
         try:
             await self._ensure_loaded()
-            if not self._cfg_bool("inject_enabled"):
-                return
             if self._is_self_message(event):
                 return
             gid = self._group_id(event)
             if not self._group_enabled(gid):
                 return
-            if not _HAS_TEXTPART or req is None:
+            if req is None:
                 return
 
             # ---- 选策略（含样本门槛：未达标则回退基线）----
             choice = self.db.state.bandit.choose(gid)
 
-            # ---- 检索相关经验 ----
             prompt = ""
             try:
                 prompt = str(getattr(req, "prompt", "") or "")
             except Exception:
                 prompt = ""
+
+            # ---- 关键：先把待归因状态记下来，这一步**不受 inject_enabled 影响** ----
+            self._remember_choice(event, gid, choice, prompt)
+
+            # ---- 以下才是「注入」，可被开关关掉 ----
+            if not self._cfg_bool("inject_enabled"):
+                return
+            if not _HAS_TEXTPART:
+                return
+
+            # ---- 检索相关经验 ----
             entries = self.db.state.memory.retrieve(
                 gid, prompt, limit=self._cfg_int("inject_max_entries", 5)
             )
@@ -467,14 +494,12 @@ class SelfEvolve(Star):
             if rendered.blocked:
                 self.db.bump_stat(gid, "blocked_injections", len(rendered.blocked))
             if not rendered.text:
-                # 什么都没学到时不留痕，避免污染状态
-                self._remember_choice(event, gid, choice, prompt)
+                # 什么都没学到：不注入，但待归因状态已在上面记好，学习照常
                 return
 
             parts = getattr(req, "extra_user_content_parts", None)
             if parts is None:
                 logger.debug("[自进化] 当前请求对象不支持 extra_user_content_parts，跳过注入")
-                self._remember_choice(event, gid, choice, prompt)
                 return
             try:
                 parts.append(TextPart(text=rendered.text))
@@ -482,7 +507,6 @@ class SelfEvolve(Star):
                 logger.warning("[自进化] 注入失败（不影响正常回复）: %s", e)
                 return
 
-            self._remember_choice(event, gid, choice, prompt)
             self.db.bump_stat(gid, "injections")
             self.db.bump_stat(gid, "injected_entries", len(rendered.used_entries))
         except Exception as e:

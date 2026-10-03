@@ -64,6 +64,7 @@ class SelfEvolveWeb:
             ("/approve", self.api_approve, ["POST"], "采纳待批候选"),
             ("/reject", self.api_reject, ["POST"], "驳回待批候选"),
             ("/forget", self.api_forget, ["POST"], "删除经验条目"),
+            ("/reset_group", self.api_reset_group, ["POST"], "清空并移除某个群的学习数据"),
             ("/rollback", self.api_rollback, ["POST"], "回滚到指定版本"),
             ("/switch", self.api_switch, ["POST"], "暂停/恢复学习"),
             ("/reflect", self.api_reflect, ["POST"], "立即执行一次反思"),
@@ -169,6 +170,33 @@ class SelfEvolveWeb:
         if not gid or not eid:
             return _err("缺少参数 group_id 或 eid", 400)
         return _ok({"message": await self.plugin._forget_text(gid, eid)})
+
+    async def api_reset_group(self):
+        """清空并移除某个群的学习数据（面板上「删除这个会话」）。
+
+        必须清 stats：``_known_groups()`` 会把 ``set(self.db.stats)`` 算进
+        「有学习痕迹的群」，只清经验/策略的话，删完刷新它又回来了。
+        """
+        payload = await _json_body()
+        gid = str(payload.get("group_id") or "")
+        if not gid:
+            return _err("缺少参数 group_id", 400)
+        removed = self.plugin.db.reset_group(gid)
+        # 顺手丢掉内存里的待归因状态与互动片段，否则刚删完又立刻长回来
+        try:
+            self.plugin._last.pop(gid, None)
+            self.plugin._history.pop(gid, None)
+        except Exception:
+            pass
+        await self.plugin.db.save()
+        still = gid in self.plugin._known_groups()
+        total = sum(int(v or 0) for v in removed.values())
+        return _ok({
+            "message": (f"已清空该群学习数据（共 {total} 项）" if total
+                        else "该群本来就没有学习数据"),
+            "removed": removed,
+            "still_listed": still,
+        })
 
     async def api_rollback(self):
         payload = await _json_body()

@@ -190,19 +190,33 @@ function renderGroups() {
   }
   for (const g of state.groups) {
     const active = g.group_id === state.current;
-    box.append(el("button", {
-      class: "group-item" + (active ? " active" : ""),
-      onClick: () => selectGroup(g.group_id),
-    }, [
-      el("div", { class: "group-line" }, [
-        el("span", { class: "group-id", text: g.group_id }),
-        g.pending ? el("span", { class: "tag warn", text: `${g.pending} 待批` }) : null,
+    // 注意：外层不能是 <button>，否则删除按钮会嵌套在按钮里（HTML 非法且点击会串）。
+    // 所以用 div 容器 + 内部两个按钮。
+    box.append(el("div", { class: "group-item" + (active ? " active" : "") }, [
+      el("button", {
+        class: "group-main",
+        title: `查看 ${g.group_id} 的学习详情`,
+        onClick: () => selectGroup(g.group_id),
+      }, [
+        el("div", { class: "group-line" }, [
+          el("span", { class: "group-id", text: g.group_id }),
+          g.pending ? el("span", { class: "tag warn", text: `${g.pending} 待批` }) : null,
+        ]),
+        el("div", { class: "group-stats" }, [
+          el("span", { text: `经验 ${g.entries_alive}` }),
+          el("span", { text: `反馈 ${g.feedback}` }),
+          el("span", { text: `注入 ${g.injections}` }),
+        ]),
       ]),
-      el("div", { class: "group-stats" }, [
-        el("span", { text: `经验 ${g.entries_alive}` }),
-        el("span", { text: `反馈 ${g.feedback}` }),
-        el("span", { text: `注入 ${g.injections}` }),
-      ]),
+      el("button", {
+        class: "group-del",
+        title: "删除这个会话的学习数据",
+        text: "✕",
+        onClick: (ev) => {
+          if (ev && ev.stopPropagation) ev.stopPropagation();
+          doDeleteGroup(g.group_id);
+        },
+      }),
     ]));
   }
 }
@@ -753,6 +767,56 @@ async function withBusy(fn) {
   }
 }
 
+/**
+ * 页面内自绘确认框，返回 Promise<boolean>。
+ *
+ * 为什么不用原生 confirm()：面板跑在 AstrBot 的受限 iframe 里，宿主若没授予
+ * `allow-modals`，confirm() 会被**直接拦掉**（返回 false 且不报错），
+ * 表现就是「点了没反应」且日志里查不出任何原因。自绘框不依赖该权限。
+ *
+ * Esc / 点遮罩 = 取消；Enter = 确认。
+ */
+function confirmDialog({ title, message, confirmText = "确定", cancelText = "取消", danger = false } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    let overlay = null;
+    const finish = (val) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener("keydown", onKey, true);
+      if (overlay && overlay.remove) overlay.remove();
+      resolve(val);
+    };
+    const onKey = (ev) => {
+      if (ev.key === "Escape") { ev.preventDefault(); finish(false); }
+      else if (ev.key === "Enter") { ev.preventDefault(); finish(true); }
+    };
+
+    const confirmBtn = el("button", {
+      class: "btn" + (danger ? " danger" : " primary"),
+      text: confirmText,
+      onClick: () => finish(true),
+    });
+    overlay = el("div", {
+      class: "modal-overlay",
+      onClick: (ev) => { if (ev.target === overlay) finish(false); },
+    }, [
+      el("div", { class: "modal-card", role: "dialog", "aria-modal": "true" }, [
+        el("div", { class: "modal-title", text: title || "确认" }),
+        el("div", { class: "modal-msg", text: message || "" }),
+        el("div", { class: "modal-actions" }, [
+          el("button", { class: "btn", text: cancelText, onClick: () => finish(false) }),
+          confirmBtn,
+        ]),
+      ]),
+    ]);
+
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(overlay);
+    try { confirmBtn.focus(); } catch (e) { /* 忽略 */ }
+  });
+}
+
 async function reloadDetail(message) {
   if (message) showError("");
   state.detail = await apiGet("group", { group_id: state.current });
@@ -792,6 +856,36 @@ function doForget(eid) {
   return withBusy(async () => {
     const r = await apiPost("forget", { group_id: state.current, eid });
     await reloadDetail((r && r.message) || "已删除");
+  });
+}
+
+/**
+ * 删除某个会话的全部学习数据。
+ *
+ * 之前面板**没有这个能力**（只有单条经验删除），所以退出的群会一直留在左侧
+ * 列表里且点不掉。后端 /reset_group 会把经验、策略、快照、审计、待批、
+ * 统计一并清掉——统计也必须清，否则列表刷新后这一行会回来。
+ */
+function doDeleteGroup(gid) {
+  const target = gid || state.current;
+  if (!target) return Promise.resolve();
+  return withBusy(async () => {
+    if (typeof confirmDialog === "function") {
+      const ok = await confirmDialog({
+        title: "删除这个会话的学习数据？",
+        message: `群 ${target} 学到的经验、策略、快照与记录都会被清空，且不可撤销。\n（不会影响群本身，也不会退群。）`,
+        confirmText: "删除",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    const r = await apiPost("reset_group", { group_id: target });
+    // 删的是当前选中的群时，清空右侧详情，避免停留在已删除的数据上
+    if (target === state.current) {
+      state.current = "";
+      state.detail = null;
+    }
+    await reloadDetail((r && r.message) || "已删除该会话");
   });
 }
 

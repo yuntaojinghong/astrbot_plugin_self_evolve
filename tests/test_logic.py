@@ -672,20 +672,33 @@ async def test_end_to_end():
     check("用户纠正被沉淀为经验条目",
                 any("北京" in e.content for e in entries), [e.content for e in entries])
 
-    # --- 已消费的消息不参与学习（群管拦下的消息）---
+    # --- 被其它插件显式消费的消息不参与学习 ---
     p3 = new_plugin()
     gid3 = "gCONSUMED"
     await p3.on_llm_request(FakeEvent("刷屏了", group=gid3), FakeReq(prompt="刷屏了"))
     await p3.after_message_sent(FakeEvent("", group=gid3, result="已处理"))
     consumed_ev = FakeEvent("不对", group=gid3, extras={"panshi.consumed": True})
     await p3.on_user_message(consumed_ev)
-    check("已消费消息不作为学习素材",
+    check("伙伴插件标记为已消费的消息不作为学习素材",
                 len(p3.db.recent_audit(gid3)) == 0, p3.db.recent_audit(gid3))
 
-    stopped_ev = FakeEvent("不对", group=gid3, stopped=True)
+    # --- 回归：仅仅是 is_stopped 的消息**必须照常学习** ---
+    # AstrBot 对「不需要机器人回复的普通群消息」本来就会 stop_event()，
+    # 那表示"这条不用走 LLM"，不是"别的插件处理过了"。而这类不 @ 机器人的
+    # 跟进（「哈哈哈」「好」）正是隐式反馈最主要的来源。
+    # 旧逻辑用 is_stopped() 当"已消费"，把它们全部丢掉——用户看到的就是
+    # 「装了几天什么都没捕捉到」。
+    stats_before = p3.db.group_stats(gid3).get("feedback", 0)
+    # 注意：上一条"已消费"消息会把 pending 清掉（一条回复只结算一次），
+    # 所以这里要先重新造一轮「机器人刚回复过」，再喂 is_stopped 的跟进。
+    await p3.on_llm_request(FakeEvent("再讲一个", group=gid3), FakeReq(prompt="再讲一个"))
+    await p3.after_message_sent(FakeEvent("", group=gid3, result="（又讲了一个）"))
+    stopped_ev = FakeEvent("哈哈哈", group=gid3, stopped=True)
     await p3.on_user_message(stopped_ev)
-    check("is_stopped 的消息同样跳过",
-                len(p3.db.recent_audit(gid3)) == 0, p3.db.recent_audit(gid3))
+    stats_after = p3.db.group_stats(gid3).get("feedback", 0)
+    check("is_stopped 的普通跟进仍被学习（隐式反馈不能丢）",
+                stats_after > stats_before,
+                f"feedback {stats_before} -> {stats_after}")
 
     # --- 机器人自身消息不学习（树洞转述）---
     p4 = new_plugin()
@@ -1153,6 +1166,128 @@ async def test_panel_frontend_bridge():
           "app.js" in html and "style.css" in html, None)
 
 
+async def test_learning_continues_when_injection_disabled():
+    """回归：inject_enabled=False 时学习必须照常进行。
+
+    用户实测报障：「装了半天捕捉不到任何东西，设置界面完全空的」。
+
+    根因：on_llm_request 在 inject_enabled=False 时**直接 return**，
+    连 _remember_choice() 都不执行 —— 于是 pending 永远不置位，
+    on_user_message 在 `not pending` 处返回，学习彻底停止。
+    而配置项对用户的说明是「关闭后仍然继续学习（可在面板观察），
+    只是不注入」，与实际行为完全相反。
+    """
+    from astrbot_plugin_self_evolve import main as main_mod
+
+    gid = "gNOINJECT"
+
+    def fresh():
+        return main_mod.SelfEvolve(Context(), {
+            "enabled": True,
+            "inject_enabled": False,     # 关键：只看不注入
+            "learn_from_implicit": True,
+            "min_signal_weight": 0.0,
+        })
+
+    p = fresh()
+    await p._ensure_loaded()
+
+    # 一轮完整互动
+    await p.on_llm_request(FakeEvent("@机器人 你叫什么", group=gid), FakeReq(prompt="你叫什么"))
+    st = p._last.get(gid) or {}
+    assert st.get("pending") is True, (
+        f"不注入时也必须记下待归因状态，否则学习停止: {st}"
+    )
+    assert st.get("choice"), "不注入时也必须选出策略，否则无法归因"
+
+    await p.after_message_sent(FakeEvent("", group=gid, result="我叫微光。"))
+
+    # 明确反馈必须被捕获
+    await p.on_user_message(FakeEvent("不对，你说错了", group=gid))
+    stats = p.db.group_stats(gid)
+    assert stats.get("feedback", 0) >= 1, f"明确反馈没被捕获: {stats}"
+    assert stats.get("signal_correction", 0) >= 1 or stats.get("signal_criticism", 0) >= 1, (
+        f"纠正/否定信号没被识别: {stats}"
+    )
+
+    # 隐式反馈也要捕获（普通群里绝大多数反应都是隐式的）
+    for _ in range(3):
+        await p.on_llm_request(FakeEvent("@机器人 继续", group=gid), FakeReq(prompt="继续"))
+        await p.after_message_sent(FakeEvent("", group=gid, result="（回复）"))
+        await p.on_user_message(FakeEvent("哈哈哈", group=gid))
+    stats2 = p.db.group_stats(gid)
+    assert stats2.get("signal_continue", 0) >= 1, f"隐式「顺着聊」信号没被捕获: {stats2}"
+
+    # 且确实没有注入任何内容
+    req = FakeReq(prompt="再问一句")
+    await p.on_llm_request(FakeEvent("@机器人 再问一句", group=gid), req)
+    assert not req.extra_user_content_parts, (
+        "inject_enabled=False 时不该往请求里塞东西"
+    )
+    check("不注入时学习照常（pending 置位 + 反馈被捕获）", True)
+
+
+async def test_no_strategy_effect_before_min_samples():
+    """说清「学了半天看不出变化」是设计而非故障。
+
+    min_samples 门槛是**每个 arm 各自**达到 N 次反馈。
+    ε-greedy 大多会选当前最优 arm（初始就是基线），所以基线样本涨得最快，
+    而其它 arm 长期停在 0~2 —— 于是策略偏移一直是 0（基线）。
+    这是保守设计的代价：安全，但用户会以为坏了。
+    本用例把这一事实固定下来，避免以后误以为它该「很快变化」。
+    """
+    from astrbot_plugin_self_evolve import main as main_mod
+
+    gid = "gWARM"
+    p = main_mod.SelfEvolve(Context(), {
+        "enabled": True, "inject_enabled": True,
+        "learn_from_implicit": True, "min_samples": 5,
+    })
+    await p._ensure_loaded()
+
+    for _ in range(16):
+        await p.on_llm_request(FakeEvent("@机器人 好玩", group=gid), FakeReq(prompt="好玩"))
+        await p.after_message_sent(FakeEvent("", group=gid, result="（回复）"))
+        await p.on_user_message(FakeEvent("哈哈哈", group=gid))
+
+    stats = p.db.group_stats(gid)
+    assert stats.get("feedback", 0) >= 10, f"应当捕获到足量反馈: {stats}"
+
+    table = p.db.state.bandit.table.get(gid) or {}
+
+    def n_of(a):
+        for attr in ("pulls", "n", "count"):
+            v = getattr(a, attr, None)
+            if isinstance(v, (int, float)):
+                return int(v)
+        if hasattr(a, "to_dict"):
+            d0 = a.to_dict()
+            for attr in ("pulls", "n", "count"):
+                v = d0.get(attr)
+                if isinstance(v, (int, float)):
+                    return int(v)
+        return 0
+
+    # 至少有一个 arm 达标（基线），否则说明门槛逻辑完全没生效
+    qualified = 0
+    for _dim, arms in table.items():
+        items = arms.values() if isinstance(arms, dict) else arms
+        for a in items:
+            if n_of(a) >= 5:
+                qualified += 1
+    assert qualified >= 1, f"跑了 16 轮却没有任何 arm 达标: {table}"
+
+    # 关键事实：偏移仍然是 0（选中基线就没有偏移）
+    choice = p.db.state.bandit.choose(gid)
+    d = choice.to_dict() if hasattr(choice, "to_dict") else dict(choice)
+    offsets = [v for k, v in d.items()
+               if k in ("length", "formality", "emoji", "warmth", "directness")]
+    assert all(abs(float(v)) < 1e-9 for v in offsets if isinstance(v, (int, float))), (
+        f"短样本内不该出现风格偏移（这正是用户以为坏了的原因）: {d}"
+    )
+    check("min_samples 门槛：短样本内策略保持基线（设计如此，非故障）", True)
+
+
 # ====================================================================== #
 
 async def main():
@@ -1167,6 +1302,8 @@ async def main():
     await test_pending_flow()
     await test_panel()
     await test_panel_frontend_bridge()
+    await test_learning_continues_when_injection_disabled()
+    await test_no_strategy_effect_before_min_samples()
     print(f"\n结果: {PASSED} 通过, {FAILED} 失败")
     sys.exit(1 if FAILED else 0)
 

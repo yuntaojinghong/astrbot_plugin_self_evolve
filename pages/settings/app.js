@@ -224,15 +224,101 @@ function renderGroups() {
 function renderPlaceholder() {
   const box = $("#content");
   box.innerHTML = "";
-  box.append(el("div", { class: "placeholder" }, [
-    el("div", { class: "placeholder-icon", text: "🧠" }),
-    el("p", { text: "从左侧选择一个群，查看它学到了什么。" }),
+
+  const boot = state.boot || {};
+  const cfg = boot.config || {};
+  const minSamples = Number(cfg.min_samples ?? 5) || 5;
+  const groups = state.groups || [];
+
+  // 汇总所有群的情况，让「还没选群」这一屏也有信息量，
+  // 而不是只有一个脑花图标加一行提示。
+  let feedback = 0;
+  let entries = 0;
+  let pending = 0;
+  let injections = 0;
+  for (const g of groups) {
+    feedback += Number(g.feedback || 0);
+    entries += Number(g.entries_alive || 0);
+    pending += Number(g.pending || 0);
+    injections += Number(g.injections || 0);
+  }
+
+  const wrap = el("div", { class: "overview-wrap" });
+
+  wrap.append(el("div", { class: "panel-head" }, [
+    el("div", {}, [
+      el("h2", { text: "学习概览" }),
+      el("p", {
+        class: "sub",
+        text: groups.length
+          ? `${groups.length} 个群有学习痕迹 · 共 ${entries} 条生效经验 · ${feedback} 次反馈归因`
+          : "还没有任何学习痕迹。右下角的「全局设置」里可以先确认插件已开启。",
+      }),
+    ]),
     el("button", {
       class: "btn primary",
-      text: "⚙ 全局设置",
+      text: "全局设置",
       onClick: () => openSettings(),
     }),
   ]));
+
+  // 四个统计块
+  const tiles = el("div", { class: "tiles" });
+  const items = [
+    ["活跃群", String(groups.length), "有学习痕迹的群数量"],
+    ["生效经验", String(entries), "会参与注入的条目数"],
+    ["反馈归因", String(feedback), "用户对上一次回复做出反应的次数"],
+    ["注入次数", String(injections), "学到的内容被拼进提示词的次数"],
+  ];
+  for (const [label, value, hint] of items) {
+    tiles.append(el("div", { class: "tile", title: hint }, [
+      el("div", { class: "tile-label", text: label }),
+      el("div", { class: "tile-value", text: value }),
+      el("div", { class: "tile-hint", text: hint }),
+    ]));
+  }
+  wrap.append(tiles);
+
+  // 门槛提示：这是「学了半天看不出变化」最常见的原因
+  wrap.append(el("div", { class: "notice" }, [
+    el("div", { class: "notice-title", text: "为什么风格还没变化？" }),
+    el("p", {
+      text: `每个风格档位各自需要累积至少 ${minSamples} 次反馈才会影响行为`
+        + `（当前 ${feedback} 次）。在此之前插件照常记录，但机器人保持默认风格。`,
+    }),
+    el("p", {
+      class: "notice-sub",
+      text: "想先看它在学什么，可以在左侧选一个群；想调门槛，去「全局设置 → 学习力度」。",
+    }),
+  ]));
+
+  // 群一览：点一下直接进详情，比在左栏找更方便
+  if (groups.length) {
+    wrap.append(el("div", { class: "notice" }, [
+      el("div", { class: "notice-title", text: "各群情况" }),
+      el("div", { class: "mini-list" }, groups.map((g) => el("button", {
+        class: "mini-row",
+        onClick: () => selectGroup(g.group_id),
+      }, [
+        el("span", { class: "mini-id", text: g.group_id }),
+        el("span", { class: "mini-stat", text: `经验 ${g.entries_alive || 0}` }),
+        el("span", { class: "mini-stat", text: `反馈 ${g.feedback || 0}` }),
+        el("span", { class: "mini-stat", text: `注入 ${g.injections || 0}` }),
+        g.pending
+          ? el("span", { class: "tag warn", text: `${g.pending} 待批` })
+          : el("span", { class: "mini-stat dim", text: "无待批" }),
+      ]))),
+    ]));
+  }
+
+  if (pending) {
+    wrap.append(el("div", { class: "notice" }, [
+      el("div", { class: "notice-title", text: "有候选等待审批" }),
+      el("p", { text: `共 ${pending} 条候选。反思产出的内容需要你确认后才会生效。` }),
+    ]));
+  }
+
+  box.append(wrap);
 }
 
 async function selectGroup(gid) {

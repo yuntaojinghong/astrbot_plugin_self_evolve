@@ -70,7 +70,7 @@ from .learning.feedback import SIG_NONE
 from .config_service import ConfigService
 from .store import AuditEntry, LearnStore, PendingItem, _new_id
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 #: 本插件在事件上留下的标记键（命名空间化，避免与其它插件冲突）
 EXTRA_NAMESPACE = "self_evolve"

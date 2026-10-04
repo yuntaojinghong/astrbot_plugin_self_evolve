@@ -111,6 +111,43 @@ html, body {
   to { transform: none; opacity: 1; }
 }
 
+/* 概览页（未选中任何群时）*/
+.overview-wrap { display: flex; flex-direction: column; gap: 14px; }
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+.tile {
+  background: var(--bg-card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px;
+}
+.tile-label { font-size: 12px; color: var(--fg-dim); }
+.tile-value { font-size: 22px; font-weight: 600; margin: 4px 0 2px; }
+.tile-hint { font-size: 11px; color: var(--fg-faint); line-height: 1.5; }
+
+.notice {
+  background: var(--bg-card); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 12px 14px;
+}
+.notice-title { font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+.notice p { margin: 0 0 4px; font-size: 12px; color: var(--fg-dim); line-height: 1.7; }
+.notice-sub { color: var(--fg-faint) !important; }
+
+.mini-list { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.mini-row {
+  display: flex; align-items: center; gap: 10px;
+  width: 100%; text-align: left; cursor: pointer;
+  background: transparent; border: 1px solid transparent;
+  border-radius: 8px; padding: 6px 8px; color: var(--fg); font: inherit;
+  transition: background .15s, border-color .15s;
+}
+.mini-row:hover { background: var(--bg-soft); border-color: var(--line); }
+.mini-id { font-weight: 600; font-size: 12px; min-width: 92px; }
+.mini-stat { font-size: 11px; color: var(--fg-dim); }
+.mini-stat.dim { color: var(--fg-faint); }
+
 .empty-hint { color: var(--fg-faint); font-size: 12px; white-space: pre-line; line-height: 1.8; }
 .sidebar-foot {
   margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line);

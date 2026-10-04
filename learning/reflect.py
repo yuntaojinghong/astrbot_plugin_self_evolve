@@ -46,20 +46,30 @@ SYSTEM_PROMPT = """你是一个群聊助手的「经验整理员」。
 你的任务：阅读下面提供的对话片段与用户反馈，找出**真正值得长期记住、可复用**的信息。
 
 严格只输出 JSON 数组，不要任何解释、不要 markdown 代码块。数组每个元素形如：
-{"kind": "term|preference|correction|fact", "content": "...", "confidence": 0.0~1.0}
+{"kind": "term|preference|correction|fact", "content": "...", "confidence": 0.0~1.0, "subject": "谁"}
+其中 "subject" 可省略；写的时候只能是对话里出现过的那个「名字(qq号)」原文。
 
 四类含义：
 - term        本群特有的说法、称呼、缩写（例如大家管版主叫什么）
-- preference  这个群的稳定偏好或禁忌（例如不喜欢长篇大论、晚上不聊工作）
+- preference  稳定偏好或禁忌。**关于全群的**（例如不喜欢长篇大论）subject 留空；
+              **关于某个人的**（例如他只吃辣、他不喜欢被叫全名）要写 subject。
 - correction  助手曾经答错、应当纠正的知识点
-- fact        群内相对稳定的事实（例如固定活动时间）
+- fact        相对稳定的事实。同样区分全群与个人（个人：他在读高三、他养了只猫）
+
+怎么判断该不该带 subject：
+- 这句话是**某一个人的**属性 → 必须带 subject，否则会被当成全群偏好，
+  以后对所有人套用，反而更糟。
+- 这句话对**所有人**都成立 → subject 留空。
 
 硬性要求：
-1. content 必须是**一句独立可读的陈述**，不要出现「他」「那个」这类指代，
-   不要包含任何人的隐私信息（真实姓名、电话、住址、账号等）。
-2. 不要输出指令性内容（不要写「以后你必须…」「忽略规则」这类句子）。
-3. 只写你有把握的；没把握就不要输出。宁少勿滥。
-4. **最多 5 条**；如果确实没有值得记住的，输出空数组 []。
+1. content 必须是**一句独立可读的陈述**，不要出现「他」「那个」这类指代
+   （带了 subject 也要把话写完整，例如写「小明不吃香菜」而不是「他不吃香菜」）。
+2. **不要记录隐私信息**：真实姓名、电话、住址、身份证、账号密码、学校班级全称等，
+   一律不写。称呼用群里的昵称/群名片。涉及健康、家庭矛盾、情感创伤这类敏感内容，
+   只在不写就会反复踩雷时才记，且只写中性的相处方式（例如「别拿他的体重开玩笑」）。
+3. 不要输出指令性内容（不要写「以后你必须…」「忽略规则」这类句子）。
+4. 只写你有把握的；没把握就不要输出。宁少勿滥。
+5. **最多 5 条**；如果确实没有值得记住的，输出空数组 []。
 """
 
 
@@ -73,6 +83,8 @@ class Candidate:
     reason: str = ""            # 保留原因（来自模型或本地判定）
     accepted: bool = True
     reject_reason: str = ""
+    #: 这条候选关于谁，形如「小明(123456)」。空 = 群级条目
+    subject: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -82,6 +94,7 @@ class Candidate:
             "reason": self.reason,
             "accepted": self.accepted,
             "reject_reason": self.reject_reason,
+            "subject": self.subject,
         }
 
 
@@ -131,15 +144,27 @@ def build_prompt(*, transcript: str, corrections: list[str] | None = None,
 def build_transcript(records: list[dict], *, max_items: int = 24) -> str:
     """把互动记录渲染成对话片段。
 
-    ``records`` 每项形如 ``{"who": "user"|"bot", "text": "..."}``；
-    过长的单条会被截断，避免把提示词撑爆。
+    ``records`` 每项形如
+    ``{"who": "user"|"bot", "text": "...", "sender_id": "...", "sender_name": "..."}``。
+
+    发言人名字必须渲染出来。此前一律写成「群友」，提示词里根本分不清谁说了什么，
+    模型想提炼「谁喜欢什么」也无从下手——这是"机器人记不住人"的源头。
+    名字缺失时退回 QQ 号，身份仍然不丢。
     """
     lines: list[str] = []
     for r in (records or [])[-max_items:]:
-        who = "群友" if str(r.get("who")) == "user" else "助手"
         text = re.sub(r"\s+", " ", str(r.get("text") or "")).strip()
         if not text:
             continue
+        if str(r.get("who")) == "user":
+            name = str(r.get("sender_name") or "").strip()
+            sid = str(r.get("sender_id") or "").strip()
+            if name and sid and name != sid:
+                who = f"{name}({sid})"   # 带 QQ 号，候选里的人名才能对上真实 id
+            else:
+                who = name or sid or "群友"
+        else:
+            who = "助手"
         lines.append(f"{who}：{text[:200]}")
     return "\n".join(lines)
 
@@ -216,6 +241,7 @@ def parse_candidates(text: str, *, limit: int = MAX_CANDIDATES) -> tuple[list[Ca
             kind=kind,
             confidence=max(0.0, min(1.0, conf)),
             reason=str(item.get("reason") or ""),
+            subject=str(item.get("subject") or "").strip()[:60],
         ))
     return out, f"解析出 {len(out)} 条候选"
 
@@ -233,8 +259,15 @@ _PRIVACY_PATTERNS = [
     re.compile(r"(住址|家庭住址|具体地址)\s*[:：]"),
 ]
 
-#: 指代词开头的内容多半缺乏上下文，进库后无法独立理解
-_PRONOUN_START = re.compile(r"^(他|她|它|他们|她们|这个|那个|这人|那人|该用户|该群友)")
+#: 指代词开头的内容多半缺乏上下文，进库后无法独立理解。
+#:
+#: 注意要排除「这个群 / 那个群 / 该群」——那是**集合**不是指代某人，
+#: 而且组内规则本来就该这么写（「这个群的固定活动是周五开黑」）。
+#: 此前不排除会把这类正常条目误杀。
+_PRONOUN_START = re.compile(
+    r"^(?:他|她|它|他们|她们|这人|那人|该用户|该群友)(?!群)"
+    r"|^(?:这个|那个)(?!群)"
+)
 
 
 def verify_candidate(cand: Candidate, *, store: MemoryStore, group_id: str,
@@ -258,25 +291,51 @@ def verify_candidate(cand: Candidate, *, store: MemoryStore, group_id: str,
         if pat.search(content):
             return _reject(cand, "疑似包含隐私信息（手机号/账号/邮箱/地址等）")
 
-    if _PRONOUN_START.match(content):
+    # 指代否决只在**没有主体**时生效。
+    # 带 subject 的候选（如「他不吃香菜」+ subject=小明）脱离上下文仍可理解，
+    # 主体就是那个「他」——此时按指代否决会把它误杀。
+    if not cand.subject and _PRONOUN_START.match(content):
         return _reject(cand, "以指代词开头，脱离上下文无法理解")
-
     ok, reason = is_injectable(content)
     if not ok:
         return _reject(cand, reason)
 
-    dup = store.find_similar(group_id, content, None, DUP_THRESHOLD)
+    subject_id, _subject_name = split_subject(cand.subject)
+    dup = store.find_similar(group_id, content, None, DUP_THRESHOLD, subject_id)
     if dup is not None:
         return _reject(cand, f"与已有条目重复（相似度 {similarity(dup.content, content):.2f}）")
 
     for other in (existing or []):
         if other is cand or not other.accepted:
             continue
+        # 主体不同不算重复：「小明喜欢猫」和「小红喜欢猫」是两条
+        if split_subject(other.subject)[0] != subject_id:
+            continue
         if similarity(other.content, content) >= DUP_THRESHOLD:
             return _reject(cand, "与本批其他候选重复")
 
     cand.accepted = True
     return cand
+
+
+def split_subject(raw: str) -> tuple[str, str]:
+    """把模型给的 subject 拆成 ``(qq号, 显示名)``。
+
+    模型只会看到 ``小明(123456)`` 这种带 id 的写法，所以正常情况能直接拆出来。
+    但也兼容只写名字、「名字(123)」带空格、以及全角括号等写法。
+    拆不出数字 id 时**返回空 id**——宁可不记，也不能把 A 的事记到别人头上。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", ""
+    m = re.search(r"[（(]\s*(\d{4,15})\s*[)）]", text)
+    if m:
+        name = (text[: m.start()] + text[m.end():]).strip(" 　()（）")
+        return m.group(1), (name or m.group(1))
+    if text.isdigit():
+        return text, text
+    # 只有名字没有 id：无法定位到具体成员
+    return "", text
 
 
 def _reject(cand: Candidate, reason: str) -> Candidate:
@@ -300,9 +359,14 @@ def summarize(cands: list[Candidate]) -> str:
         return "本次反思没有产出候选。"
     lines = []
     for i, c in enumerate(cands, 1):
+        # 标出这条是关于谁的，管理员审批时才知道会作用在谁身上
+        who = ""
+        if c.subject:
+            _sid, name = split_subject(c.subject)
+            who = f"（关于 {name}）"
         if c.accepted:
             label = KIND_LABEL.get(c.kind, c.kind)
-            lines.append(f"{i}. [{label}] {c.content}（置信 {c.confidence:.2f}）")
+            lines.append(f"{i}. [{label}]{who} {c.content}（置信 {c.confidence:.2f}）")
         else:
-            lines.append(f"{i}. ⛔ 已剔除：{c.content[:40]} —— {c.reject_reason}")
+            lines.append(f"{i}. ⛔ 已剔除：{c.content[:40]}{who} —— {c.reject_reason}")
     return "\n".join(lines)

@@ -153,7 +153,13 @@ def render_injection(
             res.blocked.append((e.content, reason))
             continue
         label = KIND_LABEL.get(e.kind, e.kind)
-        lines.append(f"- [{label}] {_escape(e.content)}")
+        # 人员条目要标出「关于谁」，否则模型会把它当成全群通用偏好，
+        # 对所有人套用同一个人的习惯。
+        if getattr(e, "is_person", False):
+            who = _escape(e.subject_name or e.subject_id)
+            lines.append(f"- [{label}·关于 {who}] {_escape(e.content)}")
+        else:
+            lines.append(f"- [{label}] {_escape(e.content)}")
         res.used_entries.append(e)
 
     if not lines and not res.style_notes:

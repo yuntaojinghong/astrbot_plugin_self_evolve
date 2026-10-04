@@ -146,7 +146,16 @@ def score_relevance(content: str, query: str, confidence: float = 1.0) -> float:
 
 @dataclass
 class Entry:
-    """一条经验。"""
+    """一条经验。
+
+    ``subject_id`` / ``subject_name`` 用来表达「这条是关于谁的」：
+
+    - 两者都为空 → 群级条目，对整个群生效（例如「本群不喜欢长篇大论」）
+    - 有值       → 人员条目，只在该成员发言时优先注入（例如「@小明 喜欢被叫猫猫」）
+
+    为什么需要它：此前所有条目都是群级的，模型整理时被明确要求「不要出现他/那个
+    这类指代」，于是「谁喜欢什么」根本无法沉淀——用户感受到的就是「机器人记不住人」。
+    """
 
     content: str
     kind: str = KIND_FACT
@@ -159,11 +168,23 @@ class Entry:
     #: 管理员确认过的条目免疫衰减与自动删除
     pinned: bool = False
     eid: str = ""
+    #: 这条经验关于谁（QQ 号）。空 = 群级条目
+    subject_id: str = ""
+    #: 该成员的显示名，仅供展示与提示词使用
+    subject_name: str = ""
 
     def __post_init__(self):
         self.content = _norm(self.content)[:MAX_CONTENT_LEN]
         if self.kind not in KINDS:
             self.kind = KIND_FACT
+        self.subject_id = str(self.subject_id or "").strip()
+        self.subject_name = str(self.subject_name or "").strip()[:40]
+        # 只有 id 没有名字时，用 id 兜底显示，避免面板出现空白主体
+        if self.subject_id and not self.subject_name:
+            self.subject_name = self.subject_id
+        # 只有名字没有 id：无法做检索，退化成群级条目
+        if not self.subject_id:
+            self.subject_name = ""
         now = time.time()
         if not self.created:
             self.created = now
@@ -172,7 +193,21 @@ class Entry:
         self.confidence = max(0.0, min(1.0, float(self.confidence)))
         self.evidence = max(1, int(self.evidence))
         if not self.eid:
-            self.eid = f"{self.group_id}:{self.kind}:{_dedup_key(self.content)[:40]}"
+            self.eid = self.make_eid()
+
+    def make_eid(self) -> str:
+        """生成稳定 id。
+
+        主体必须参与：否则「小明喜欢猫」和「小红喜欢猫」会算出同一个 eid，
+        互相覆盖。eid 同时是去重键，所以这是正确性问题，不只是好看。
+        """
+        scope = self.subject_id or "group"
+        return f"{self.group_id}:{scope}:{self.kind}:{_dedup_key(self.content)[:40]}"
+
+    @property
+    def is_person(self) -> bool:
+        """是否是关于某个具体成员的条目。"""
+        return bool(self.subject_id)
 
     # ---------- 派生属性 ---------- #
 
@@ -209,6 +244,9 @@ class Entry:
             "last_seen": self.last_seen,
             "pinned": self.pinned,
             "eid": self.eid,
+            # 老数据里没有这两个键，from_dict 会补成空串 → 自动当作群级条目
+            "subject_id": self.subject_id,
+            "subject_name": self.subject_name,
         }
 
     @classmethod
@@ -229,6 +267,8 @@ class Entry:
             last_seen=float(d.get("last_seen", 0) or 0),
             pinned=bool(d.get("pinned", False)),
             eid=str(d.get("eid", "")),
+            subject_id=str(d.get("subject_id", "") or ""),
+            subject_name=str(d.get("subject_name", "") or ""),
         )
 
 
@@ -266,11 +306,19 @@ class MemoryStore:
         return list(self.groups.get(str(group_id or ""), []))
 
     def find_similar(self, group_id: str, content: str, kind: str | None = None,
-                     threshold: float = 0.72) -> Entry | None:
-        """找语义上重复的条目。"""
+                     threshold: float = 0.72, subject_id: str = "") -> Entry | None:
+        """找语义上重复的条目。
+
+        ``subject_id`` 参与判定：不同人的同类事实不能合并。否则
+        「小明喜欢猫」和「小红喜欢猫」内容高度相似，会被并成一条，
+        两个人的偏好就只剩一个人的了。
+        """
+        want = str(subject_id or "").strip()
         best, best_sim = None, 0.0
         for e in self.groups.get(str(group_id or ""), []):
             if kind and e.kind != kind:
+                continue
+            if e.subject_id != want:
                 continue
             s = similarity(e.content, content)
             if s >= threshold and s > best_sim:
@@ -286,12 +334,16 @@ class MemoryStore:
         gid = str(entry.group_id or "")
         bucket = self.groups.setdefault(gid, [])
 
-        dup = self.find_similar(gid, entry.content, entry.kind, merge_threshold)
+        dup = self.find_similar(gid, entry.content, entry.kind, merge_threshold,
+                                entry.subject_id)
         if dup is not None:
             dup.evidence += 1
             dup.last_seen = now
             # 重复印证提升置信度，但收敛到 1.0，避免"说得多就一定对"
             dup.confidence = min(1.0, dup.confidence + (1.0 - dup.confidence) * 0.25)
+            # 后到的显示名补上（可能比先前更准确）
+            if entry.subject_name and not dup.subject_name:
+                dup.subject_name = entry.subject_name
             if entry.source == SOURCE_ADMIN:
                 dup.pinned = True
                 dup.confidence = max(dup.confidence, 0.9)
@@ -301,8 +353,12 @@ class MemoryStore:
         entry.group_id = gid
         entry.created = entry.created or now
         entry.last_seen = now
-        if not entry.eid:
-            entry.eid = f"{gid}:{entry.kind}:{_dedup_key(entry.content)[:40]}"
+        # 无条件按最终归属重算 eid。
+        #
+        # 不能只判断 `if not entry.eid`：调用方常常先构造一条模板条目，
+        # 那个临时 eid 是按空 group_id 算的。更关键的是，若有人复制已有条目
+        # 改主体，沿用旧 eid 会让两条不同主体的记录共用同一个 id。
+        entry.eid = entry.make_eid()
         if entry.source == SOURCE_ADMIN:
             entry.pinned = True
             entry.confidence = max(entry.confidence, 0.9)
@@ -376,20 +432,73 @@ class MemoryStore:
     # ---------- 检索 ---------- #
 
     def retrieve(self, group_id: str, query: str = "", *, limit: int = 5,
-                 now: float | None = None, min_score: float = 0.18) -> list[Entry]:
-        """取最有用的若干条：相关度 × 有效置信度 排序。"""
+                 now: float | None = None, min_score: float = 0.18,
+                 subject_id: str = "") -> list[Entry]:
+        """取最有用的若干条：相关度 × 有效置信度 排序。
+
+        ``subject_id`` 是**当前发言人**。传入时：
+
+        - 关于他的个人条目优先，且**豁免关键词相关度过滤**——「记住某人」的意义
+          就在于他说什么都能想起来，而不是非要提到关键字才想得起来。
+        - 其他人的个人条目不注入（避免把 A 的偏好套到 B 身上）。
+        - 群级条目照旧按相关度参与。
+
+        不传 ``subject_id`` 时行为与从前一致（只取群级条目之外的全部），
+        以便旧的调用方不受影响。
+        """
         now = time.time() if now is None else now
-        scored: list[tuple[float, Entry]] = []
+        want = str(subject_id or "").strip()
+        person: list[tuple[float, Entry]] = []
+        group: list[tuple[float, Entry]] = []
+
         for e in self.groups.get(str(group_id or ""), []):
             conf = e.effective_confidence(self.half_life_days, now)
             if conf < MIN_CONFIDENCE:
                 continue
+            if e.subject_id:
+                if e.subject_id != want:
+                    continue        # 别人的个人条目，不注入
+                # 本人的条目：不设相关度门槛，按置信度排序
+                person.append((conf, e))
+                continue
             score = e.relevance(query) * conf
             if query and score < min_score:
                 continue
-            scored.append((score, e))
-        scored.sort(key=lambda t: t[0], reverse=True)
-        return [e for _, e in scored[: max(0, int(limit))]]
+            group.append((score, e))
+
+        person.sort(key=lambda t: t[0], reverse=True)
+        group.sort(key=lambda t: t[0], reverse=True)
+
+        total = max(0, int(limit))
+        # 个人条目最多占一半额度，剩下的留给群级上下文，
+        # 否则一个人攒的条目会把整块注入额度吃光。
+        person_quota = total if not want else max(1, total // 2 + total % 2)
+        picked = [e for _, e in person[:person_quota]]
+        room = total - len(picked)
+        if room > 0:
+            picked += [e for _, e in group[:room]]
+        # 仍有余量（群级条目不够）就把落选的个人条目补回来
+        room = total - len(picked)
+        if room > 0:
+            picked += [e for _, e in person[person_quota: person_quota + room]]
+        return picked[:total]
+
+    def person_entries(self, group_id: str, subject_id: str,
+                       *, now: float | None = None) -> list[Entry]:
+        """某人在本群的全部个人条目（含已衰减到门槛以下的，供面板展示）。"""
+        want = str(subject_id or "").strip()
+        if not want:
+            return []
+        return [e for e in self.groups.get(str(group_id or ""), [])
+                if e.subject_id == want]
+
+    def known_people(self, group_id: str) -> dict[str, str]:
+        """本群已记住的成员：{subject_id: subject_name}。"""
+        out: dict[str, str] = {}
+        for e in self.groups.get(str(group_id or ""), []):
+            if e.subject_id:
+                out.setdefault(e.subject_id, e.subject_name or e.subject_id)
+        return out
 
     # ---------- 统计 / 序列化 ---------- #
 

@@ -63,6 +63,8 @@ from .learning import (
     parse_feedback,
     render_injection,
     render_summary,
+    should_learn,
+    split_subject,
     summarize,
     verify_all,
 )
@@ -70,7 +72,7 @@ from .learning.feedback import SIG_NONE
 from .config_service import ConfigService
 from .store import AuditEntry, LearnStore, PendingItem, _new_id
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 
 #: 本插件在事件上留下的标记键（命名空间化，避免与其它插件冲突）
 EXTRA_NAMESPACE = "self_evolve"
@@ -177,6 +179,10 @@ class SelfEvolve(Star):
         "reflect_provider_id": "",
         "auto_reflect": False,
         "auto_reflect_minutes": 720,
+        # 自动采纳：关闭时反思结果只进待批区，需要人工逐条确认。
+        # 开启后高置信候选直接生效，低置信的仍进待批区。
+        "auto_approve": False,
+        "auto_approve_min_confidence": 0.8,
     }
 
     @classmethod
@@ -336,14 +342,18 @@ class SelfEvolve(Star):
                 if not self._cfg_bool("enabled") or not self._cfg_bool("auto_reflect"):
                     continue
                 cutoff = time.time() - minutes * 60
+                auto_approve = self._cfg_bool("auto_approve")
                 for gid, bucket in list(self._history.items()):
                     if not bucket:
                         continue
                     if float(bucket[-1].get("ts") or 0) < cutoff:
                         continue
-                    if self.db.pending_items(gid, status="pending"):
-                        continue    # 上一次的还没审，先别堆
-                    result = await self.run_reflection(gid)
+                    # 待批积压时先不反思，避免越堆越多。
+                    # 但只有在**不自动采纳**时才这样：否则一条待批就能让这个群
+                    # 永远不再反思（没人去点「通过」），学习彻底停摆。
+                    if not auto_approve and self.db.pending_items(gid, status="pending"):
+                        continue
+                    result = await self.run_reflection(gid, auto=True)
                     logger.info("[自进化] 自动反思 %s: %s", gid, result.splitlines()[0])
             except asyncio.CancelledError:
                 raise
@@ -375,6 +385,24 @@ class SelfEvolve(Star):
             return str(event.get_sender_id() or "")
         except Exception:
             return ""
+
+    @staticmethod
+    def _sender_name(event) -> str:
+        """发言人显示名（群名片/昵称）。
+
+        取不到时返回空串，由 Entry 用 QQ 号兜底显示；
+        绝不能用群里任意一个名字顶替，否则会把 A 的事实记到 B 头上。
+        """
+        for getter in ("get_sender_name",):
+            fn = getattr(event, getter, None)
+            if callable(fn):
+                try:
+                    name = str(fn() or "").strip()
+                    if name:
+                        return name[:40]
+                except Exception:
+                    pass
+        return ""
 
     @staticmethod
     def _self_id(event) -> str:
@@ -483,8 +511,11 @@ class SelfEvolve(Star):
                 return
 
             # ---- 检索相关经验 ----
+            # 传入当前发言人：关于他的条目不设相关度门槛（"记住某人"的意义就是
+            # 他说话时能想起来），别人的个人条目则完全不注入。
             entries = self.db.state.memory.retrieve(
-                gid, prompt, limit=self._cfg_int("inject_max_entries", 5)
+                gid, prompt, limit=self._cfg_int("inject_max_entries", 5),
+                subject_id=self._sender_id(event),
             )
 
             rendered = render_injection(
@@ -548,12 +579,30 @@ class SelfEvolve(Star):
         except Exception as e:
             logger.debug("[自进化] 发送后钩子异常（已忽略）: %s", e)
 
-    def _append_history(self, gid: str, who: str, text: str) -> None:
-        """记录最近互动片段（反思的素材），带条数与单条长度上限。"""
+    def _append_history(self, gid: str, who: str, text: str,
+                        sender_id: str = "", sender_name: str = "") -> None:
+        """记录最近互动片段（反思的素材），带条数与单条长度上限。
+
+        ``sender_id`` / ``sender_name`` 必须一并记下：反思要能提炼出
+        「谁喜欢什么」，就得先知道每句话是谁说的。此前这里只记 ``who: "user"``，
+        于是提示词里所有人都被渲染成「群友」，人员信息在源头就丢失了。
+        """
         if not gid or not text:
             return
+        # 不该学的文本不入素材：命令、系统输出、报错、纯媒体占位。
+        # 放进来的话，反思会把「/reset」或报错信息当成群偏好沉淀下来。
+        learnable, reason = should_learn(text)
+        if not learnable:
+            logger.debug("[自进化] 跳过学习素材（%s）：%s", reason, str(text)[:40])
+            return
         bucket = self._history.setdefault(gid, [])
-        bucket.append({"who": who, "text": str(text)[:200], "ts": time.time()})
+        bucket.append({
+            "who": who,
+            "text": str(text)[:200],
+            "ts": time.time(),
+            "sender_id": str(sender_id or ""),
+            "sender_name": str(sender_name or ""),
+        })
         limit = self._cfg_int("history_limit", 60) or 60
         if len(bucket) > limit:
             del bucket[: len(bucket) - limit]
@@ -602,7 +651,9 @@ class SelfEvolve(Star):
             if not text:
                 return
             if not consumed:
-                self._append_history(gid, "user", text)
+                self._append_history(gid, "user", text,
+                                     self._sender_id(event),
+                                     self._sender_name(event))
 
             st = self._last.get(gid) or {}
             prev_reply = str(st.get("reply") or "")
@@ -744,8 +795,13 @@ class SelfEvolve(Star):
                 out.append(a.correction)
         return out
 
-    async def run_reflection(self, gid: str) -> str:
-        """执行一次反思并把通过的候选放进待批区。返回给用户看的说明。"""
+    async def run_reflection(self, gid: str, *, auto: bool = False) -> str:
+        """执行一次反思。
+
+        ``auto=False``（默认，命令触发）：通过的候选进待批区，等管理员审批。
+        ``auto=True``（自动反思触发）：若开启 ``auto_approve`` 且候选置信度达标，
+        直接采纳生效；否则仍然进待批区。
+        """
         transcript = build_transcript(self._history.get(gid, []))
         if len(transcript) < 20:
             return "🤔 本群可用的互动片段太少，暂时没什么可复盘的。\n（多聊几轮、或积累一些反馈后再试。）"
@@ -770,19 +826,64 @@ class SelfEvolve(Star):
         accepted = [c for c in cands if c.accepted]
         self.db.bump_stat(gid, "reflections")
 
+        # 自动反思时可以按置信度直采，否则一律进待批区等人工确认
+        auto_approve = (auto
+                        and self._cfg_bool("auto_approve")
+                        and not self._is_paused())
+        min_conf = self._cfg_float("auto_approve_min_confidence", 0.8)
+
+        queued = 0
+        applied = 0
         for c in accepted:
+            if auto_approve and c.confidence >= min_conf:
+                sid, sname = split_subject(c.subject)
+                res = self.db.state.memory.add(Entry(
+                    content=c.content, kind=c.kind, group_id=gid,
+                    confidence=c.confidence, source=SOURCE_REFLECT,
+                    subject_id=sid, subject_name=sname,
+                ))
+                self.db.log_audit(AuditEntry(
+                    aid=_new_id("a"), group_id=gid, created=time.time(),
+                    signal="auto_approve",
+                    evidence=c.content,
+                    note=("自动采纳（置信 %.2f）%s"
+                          % (c.confidence, f"（关于 {sname}）" if sid else "")),
+                ))
+                applied += 1 if (res.created or res.merged) else 0
+                continue
+
+            sid, sname = split_subject(c.subject)
+            payload = {"content": c.content, "kind": c.kind,
+                       "confidence": c.confidence}
+            if sid:
+                payload["subject_id"] = sid
+                payload["subject_name"] = sname
+            about = f"，关于 {sname}" if sid else ""
             self.db.add_pending(PendingItem(
                 pid=_new_id("p"), group_id=gid, created=time.time(),
                 kind="entry",
-                payload={"content": c.content, "kind": c.kind, "confidence": c.confidence},
-                reason=f"反思候选（置信 {c.confidence:.2f}）",
+                payload=payload,
+                reason=f"反思候选（置信 {c.confidence:.2f}{about}）",
             ))
+            queued += 1
+
+        if applied and self._cfg_bool("auto_snapshot"):
+            self.db.push_snapshot(gid, f"自动采纳 {applied} 条", {"memory": f"+{applied}"})
+        if applied:
+            self.db.bump_stat(gid, "approved", applied)
         await self.db.maybe_save()
 
-        lines = ["🧪 反思完成（结果未生效，需审批）", "", summarize(cands), ""]
-        if accepted:
-            lines.append(f"共 {len(accepted)} 条进入待批区。「进化 审批」查看，「进化 通过 <编号>」采纳。")
+        if applied:
+            head = f"🧪 反思完成：自动采纳 {applied} 条（阈值 {min_conf:.2f}）"
+        elif auto_approve:
+            head = "🧪 反思完成：没有达到自动采纳阈值的候选"
         else:
+            head = "🧪 反思完成（结果未生效，需审批）"
+        lines = [head, "", summarize(cands), ""]
+        if queued:
+            lines.append(f"另有 {queued} 条进入待批区。"
+                         "「进化 审批」查看，「进化 通过 <编号>」采纳。")
+        elif not accepted:
             lines.append("本次没有候选通过校验（原因见上）。")
         return "\n".join(lines)
 
@@ -828,6 +929,10 @@ class SelfEvolve(Star):
                     group_id=gid,
                     confidence=float(p.get("confidence", 0.5) or 0.5),
                     source=SOURCE_REFLECT,
+                    # 人员条目必须带上主体，否则会退化成群级偏好，
+                    # 以后对所有人套用同一个人的习惯
+                    subject_id=str(p.get("subject_id") or ""),
+                    subject_name=str(p.get("subject_name") or ""),
                 ))
                 added += 1 if res.created else 0
                 merged += 1 if res.merged else 0

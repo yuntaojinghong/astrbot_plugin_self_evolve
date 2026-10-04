@@ -228,5 +228,22 @@
       "max": 10080,
       "step": 15
     }
+  },
+  "auto_approve": {
+    "description": "自动采纳高置信候选（不再需要人工审批）",
+    "type": "bool",
+    "default": false,
+    "hint": "关闭时反思结果只进待批区，需要你用「进化 通过」逐条确认。开启后置信度达标的候选会自动生效——省事，但等于让模型自己改自己，建议先观察一段时间再开"
+  },
+  "auto_approve_min_confidence": {
+    "description": "自动采纳的最低置信度",
+    "type": "float",
+    "default": 0.8,
+    "slider": {
+      "min": 0.5,
+      "max": 1.0,
+      "step": 0.05
+    },
+    "hint": "只在这个阈值以上的候选才会被自动采纳，低于它的仍进待批区"
   }
 }

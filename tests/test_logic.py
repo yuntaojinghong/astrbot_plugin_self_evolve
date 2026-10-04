@@ -1300,12 +1300,290 @@ async def test_no_strategy_effect_before_min_samples():
     check("min_samples 门槛：短样本内策略保持基线（设计如此，非故障）", True)
 
 
+async def test_person_memory():
+    """人员记忆：机器人要能记住「谁是什么样的人」。
+
+    此前所有条目的主体都只有 group_id，提示词还明确要求「不要出现他/那个」，
+    于是「谁喜欢什么」根本无法沉淀，用户感受到的就是「机器人记不住人」。
+    """
+    gid = "gP1"
+    XM, XH = "111111", "222222"
+
+    def build():
+        return memory.MemoryStore(max_per_group=50, half_life_days=30)
+
+    # ---------- 1. 不同人的同类事实不能合并 ----------
+    m = build()
+    m.add(memory.Entry(content="小明不吃香菜", kind=memory.KIND_FACT,
+                       group_id=gid, subject_id=XM, subject_name="小明"))
+    m.add(memory.Entry(content="小红不吃香菜", kind=memory.KIND_FACT,
+                       group_id=gid, subject_id=XH, subject_name="小红"))
+    ents = m.entries(gid)
+    check("不同人的同类事实各自成条（不会被合并成一条）", len(ents) == 2,
+          [(e.subject_name, e.content) for e in ents])
+    check("两条的 eid 不同（否则会互相覆盖）", len({e.eid for e in ents}) == 2,
+          [e.eid for e in ents])
+
+    # 同一个人的同一事实才合并
+    m.add(memory.Entry(content="小明不吃香菜", kind=memory.KIND_FACT,
+                       group_id=gid, subject_id=XM, subject_name="小明"))
+    xm_entries = m.person_entries(gid, XM)
+    check("同一个人的同一事实被合并", len(xm_entries) == 1 and xm_entries[0].evidence == 2,
+          [(e.content, e.evidence) for e in xm_entries])
+
+    # ---------- 2. 检索只给当前发言人 ----------
+    m.add(memory.Entry(content="本群不喜欢长篇大论", kind=memory.KIND_PREFERENCE,
+                       group_id=gid))
+    # 注意：群级条目仍受关键词相关度约束（这是设计），所以查询词要与它重叠
+    got_xm = m.retrieve(gid, "本群不喜欢长篇大论吧", limit=5, subject_id=XM)
+    names = {e.subject_name for e in got_xm if e.is_person}
+    check("检索到本人条目", any(e.subject_id == XM for e in got_xm),
+          [(e.subject_name, e.content) for e in got_xm])
+    check("不会把别人的个人条目注入给本人", XH not in {e.subject_id for e in got_xm},
+          [(e.subject_name, e.content) for e in got_xm])
+    check("群级条目照常参与", any(not e.is_person for e in got_xm),
+          [(e.subject_name, e.content) for e in got_xm])
+
+    # 本人条目豁免相关度门槛：问「今天吃什么」也该想起他的忌口
+    got_food = m.retrieve(gid, "今天吃什么好", limit=5, subject_id=XM)
+    check("本人条目不受关键词相关度限制",
+          any(e.subject_id == XM and "香菜" in e.content for e in got_food),
+          [(e.subject_name, e.content) for e in got_food])
+
+    # 别人问同一句，不该看到小明的忌口
+    got_other = m.retrieve(gid, "今天吃什么好", limit=5, subject_id=XH)
+    check("换成另一个人则不注入小明的条目",
+          not any(e.subject_id == XM for e in got_other),
+          [(e.subject_name, e.content) for e in got_other])
+
+    # ---------- 3. 老数据兼容 ----------
+    old = memory.Entry.from_dict({
+        "content": "每周五晚上开黑", "kind": memory.KIND_FACT,
+        "group_id": gid, "confidence": 0.6, "eid": "old:eid",
+    })
+    check("老数据（无 subject 字段）仍能读入且当作群级条目",
+          old is not None and not old.is_person, old)
+
+    # ---------- 4. 只有名字没有 id 时退化为群级 ----------
+    noid = memory.Entry(content="某人喜欢猫", kind=memory.KIND_FACT,
+                        group_id=gid, subject_name="只有名字")
+    check("只有名字没有 id → 退化成群级条目（不冒充个人条目）",
+          not noid.is_person, (noid.subject_id, noid.subject_name))
+
+    # ---------- 5. subject 拆分 ----------
+    check("拆分 名字(qq)", T_reflect.split_subject("小明(123456)") == ("123456", "小明"),
+          T_reflect.split_subject("小明(123456)"))
+    check("拆分 名字（全角括号+空格）",
+          T_reflect.split_subject("小明 （123456）") == ("123456", "小明"),
+          T_reflect.split_subject("小明 （123456）"))
+    check("拆分 纯数字", T_reflect.split_subject("123456") == ("123456", "123456"),
+          T_reflect.split_subject("123456"))
+    check("只有名字时 id 为空（宁可不记也不错记）",
+          T_reflect.split_subject("小明") == ("", "小明"),
+          T_reflect.split_subject("小明"))
+    check("空 subject", T_reflect.split_subject("") == ("", ""),
+          T_reflect.split_subject(""))
+
+    # ---------- 6. 注入文本要标出「关于谁」 ----------
+    rend = profile.render_injection(entries=m.person_entries(gid, XM))
+    check("注入文本标出了主体", "关于 小明" in rend.text, rend.text[:120])
+
+    people = m.known_people(gid)
+    check("known_people 返回已记住的成员",
+          people.get(XM) == "小明" and people.get(XH) == "小红", people)
+
+    check("人员记忆整体行为正确", True)
+
+
+async def test_person_candidate_verification():
+    """带 subject 的候选：指代否决要放行，隐私与乱写仍要拦。"""
+    gid = "gP2"
+    store = memory.MemoryStore(max_per_group=50, half_life_days=30)
+
+    # 带 subject 时，「他」开头的句子是可理解的（主体就是那个「他」）
+    c1 = T_reflect.Candidate(content="他不吃香菜", kind=memory.KIND_PREFERENCE,
+                           confidence=0.8, subject="小明(123456)")
+    T_reflect.verify_candidate(c1, store=store, group_id=gid)
+    check("带 subject 时放行「他」开头的句子", c1.accepted, c1.reject_reason)
+
+    # 不带 subject 时，指代仍然要拦（脱离上下文无法理解）
+    c2 = T_reflect.Candidate(content="他不吃香菜", kind=memory.KIND_PREFERENCE,
+                           confidence=0.8)
+    T_reflect.verify_candidate(c2, store=store, group_id=gid)
+    check("不带 subject 时仍拦「他」开头", not c2.accepted, c2.reject_reason)
+
+    # 隐私信息一律拦，即使带了 subject
+    c3 = T_reflect.Candidate(content="小明的手机号是13800138000",
+                           kind=memory.KIND_FACT, confidence=0.9,
+                           subject="小明(123456)")
+    T_reflect.verify_candidate(c3, store=store, group_id=gid)
+    check("带 subject 也不能记隐私", not c3.accepted, c3.reject_reason)
+
+    # 批内去重要考虑主体：不同人的同类候选不该被判重
+    a = T_reflect.Candidate(content="喜欢猫咪", kind=memory.KIND_PREFERENCE,
+                          confidence=0.8, subject="小明(123456)")
+    b = T_reflect.Candidate(content="喜欢猫咪", kind=memory.KIND_PREFERENCE,
+                          confidence=0.8, subject="小红(999999)")
+    T_reflect.verify_all([a, b], store=store, group_id=gid)
+    check("不同主体的相似候选都保留", a.accepted and b.accepted,
+          (a.accepted, a.reject_reason, b.accepted, b.reject_reason))
+
+    # 同一个人 + 相似内容 → 判重
+    a2 = T_reflect.Candidate(content="喜欢猫咪", kind=memory.KIND_PREFERENCE,
+                           confidence=0.8, subject="小明(123456)")
+    a3 = T_reflect.Candidate(content="喜欢猫咪", kind=memory.KIND_PREFERENCE,
+                           confidence=0.8, subject="小明(123456)")
+    T_reflect.verify_all([a2, a3], store=store, group_id=gid)
+    check("同主体相似候选判重", a2.accepted and not a3.accepted,
+          (a2.accepted, a3.accepted, a3.reject_reason))
+
+    # 摘要要把主体显示出来，管理员才知道会作用在谁身上
+    text = T_reflect.summarize([a, b])
+    check("摘要标出关于谁", "关于 小明" in text and "关于 小红" in text, text)
+
+    check("人员候选校验正确", True)
+
+
+async def test_transcript_keeps_speaker():
+    """反思素材必须保留发言人，否则模型无从提炼「谁喜欢什么」。"""
+    records = [
+        {"who": "user", "text": "我不吃香菜", "sender_id": "111111", "sender_name": "小明"},
+        {"who": "bot", "text": "好的", "sender_id": "", "sender_name": ""},
+        {"who": "user", "text": "今天吃什么", "sender_id": "222222", "sender_name": ""},
+    ]
+    text = T_reflect.build_transcript(records)
+    check("渲染出真实发言人（带 QQ 号）", "小明(111111)" in text, text)
+    check("缺名字时退回 QQ 号", "222222" in text, text)
+    check("机器人仍显示为助手", "助手：" in text, text)
+    check("不再把所有发言人都写成「群友」", "群友：" not in text, text)
+
+    # 老格式（无 sender 字段）不能崩
+    old_text = T_reflect.build_transcript([{"who": "user", "text": "老数据"}])
+    check("老格式素材不报错且回退为「群友」", "群友：老数据" in old_text, old_text)
+
+    check("素材保留发言人", True)
+
+
+async def test_sampling_filter():
+    """学习素材过滤：命令/系统输出/报错/纯媒体不入素材。"""
+    S = importlib.import_module(f"{PKG}.learning.sampling")
+
+    skip = [
+        "/reset", "!help", ".签到", "／妈妈",
+        "help", "Reset", "帮助", "菜单",
+        "使用 /禁言 命令可以禁言", "输入!help查看菜单",
+        "AstrBot v4.28.0", "Traceback (most recent call last):",
+        "sqlite3.OperationalError: database is locked",
+        "调用超时，重试中",
+        "[图片]", "[Image]", "[Face] [Face]",
+        "？？？", "...",
+    ]
+    keep = [
+        "我不吃香菜", "今天中午吃啥", "小明喜欢猫",
+        "群主太努力了", "哈哈哈哈", "难崩", "这鱼欠调了",
+    ]
+    bad = []
+    for t in skip:
+        ok, why = S.should_learn(t)
+        if ok:
+            bad.append(t)
+    check("命令/系统输出/媒体占位全部被过滤（19 例）", not bad, bad)
+    bad2 = []
+    for t in keep:
+        ok, why = S.should_learn(t)
+        if not ok:
+            bad2.append((t, why))
+    check("正常群聊内容全部保留（7 例）", not bad2, bad2)
+
+    # 过滤只作用于「学习素材」，不影响反馈归因——
+    # 「？」这类只有符号的消息仍然要能当反馈信号。
+    fb = learning.parse_feedback("？", prev_user_text="今天吃什么",
+                                 is_reply_to_bot=True)
+    check("纯符号仍能作为反馈信号（不被素材过滤误伤）",
+          fb is not None, fb)
+
+
+async def test_auto_approve():
+    """自动采纳：默认关闭，开启后按阈值区分高/低置信。"""
+    gid = "gAUTO"
+    from astrbot_plugin_self_evolve.learning import Candidate, verify_all
+
+    p = main_mod.SelfEvolve(Context(), {
+        "enabled": True, "inject_enabled": False,
+        "auto_approve": True, "auto_approve_min_confidence": 0.8,
+    })
+    await p._ensure_loaded()
+
+    cands = verify_all([
+        Candidate(content="小明不吃香菜", kind=memory.KIND_PREFERENCE,
+                  confidence=0.9, subject="小明(111111)"),
+        # 低置信一条也要能过校验（此前用过 3 字内容，会被 MIN_LEN=4 拦掉）
+        Candidate(content="这个群可能比较喜欢安静", kind=memory.KIND_PREFERENCE,
+                  confidence=0.5),
+    ], store=p.db.state.memory, group_id=gid)
+    accepted = [c for c in cands if c.accepted]
+    high = [c for c in accepted if c.confidence >= 0.8]
+    low = [c for c in accepted if c.confidence < 0.8]
+    check("高置信 / 低置信按阈值区分开", len(high) == 1 and len(low) == 1,
+          [(c.content, c.confidence) for c in accepted])
+
+    p2 = main_mod.SelfEvolve(Context(), {"enabled": True})
+    await p2._ensure_loaded()
+    check("默认 auto_approve 为 False", p2._cfg_bool("auto_approve") is False)
+    check("默认阈值为 0.8",
+          abs(p2._cfg_float("auto_approve_min_confidence", 0.8) - 0.8) < 1e-9)
+    check("开启后读到 True", p._cfg_bool("auto_approve") is True)
+
+    p3 = main_mod.SelfEvolve(Context(), {"enabled": True,
+                                         "auto_approve_min_confidence": 0.95})
+    await p3._ensure_loaded()
+    check("阈值可配置",
+          abs(p3._cfg_float("auto_approve_min_confidence", 0.8) - 0.95) < 1e-9)
+
+
+async def test_auto_reflect_not_deadlocked():
+    """自动反思不能因为「有待批没审」就永远不再反思。
+
+    旧逻辑无条件跳过有待批的群；而待批只能人工批准，于是没人点「通过」时
+    这个群的学习就彻底停摆。现在只有**没开自动采纳**时才跳过。
+    """
+    p = main_mod.SelfEvolve(Context(), {"enabled": True})
+    await p._ensure_loaded()
+    p.db.add_pending(store_mod.PendingItem(
+        pid="p1", group_id="gDL", created=time.time(), kind="entry",
+        payload={"content": "占位候选", "kind": memory.KIND_FACT},
+        reason="测试",
+    ))
+    check("待批已写入", len(p.db.pending_items("gDL", status="pending")) == 1)
+
+    auto_approve = p._cfg_bool("auto_approve")
+    skip = (not auto_approve) and bool(p.db.pending_items("gDL", status="pending"))
+    check("未开自动采纳时，有待批则跳过（防堆积）", skip is True)
+
+    p2 = main_mod.SelfEvolve(Context(), {"enabled": True, "auto_approve": True})
+    await p2._ensure_loaded()
+    p2.db.add_pending(store_mod.PendingItem(
+        pid="p2", group_id="gDL", created=time.time(), kind="entry",
+        payload={"content": "占位候选", "kind": memory.KIND_FACT},
+        reason="测试",
+    ))
+    auto2 = p2._cfg_bool("auto_approve")
+    skip2 = (not auto2) and bool(p2.db.pending_items("gDL", status="pending"))
+    check("开了自动采纳后不再因待批而死锁", skip2 is False)
+
+
 # ====================================================================== #
 
 async def main():
     await test_feedback()
     await test_bandit()
     await test_memory()
+    await test_person_memory()
+    await test_person_candidate_verification()
+    await test_transcript_keeps_speaker()
+    await test_sampling_filter()
+    await test_auto_approve()
+    await test_auto_reflect_not_deadlocked()
     await test_profile()
     await test_end_to_end()
     await test_commands_and_rollback()

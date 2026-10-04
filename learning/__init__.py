@@ -58,10 +58,12 @@ from .reflect import (
     build_prompt,
     build_transcript,
     parse_candidates,
+    split_subject,
     summarize,
     verify_all,
     verify_candidate,
 )
+from .sampling import MIN_LEARNABLE_LEN, should_learn
 from .profile import (
     CLOSE_TAG,
     OPEN_TAG,
@@ -91,5 +93,7 @@ __all__ = [
     "render_injection", "render_style", "render_summary",
     # reflect
     "MAX_CANDIDATES", "Candidate", "build_prompt", "build_transcript",
-    "parse_candidates", "summarize", "verify_all", "verify_candidate",
+    "parse_candidates", "split_subject", "summarize", "verify_all", "verify_candidate",
+    # sampling
+    "should_learn", "MIN_LEARNABLE_LEN",
 ]

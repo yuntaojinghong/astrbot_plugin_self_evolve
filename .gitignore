@@ -25,3 +25,6 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
+
+# 前端测试用 jsdom，本地会临时链接到 node_modules
+node_modules/

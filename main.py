@@ -30,7 +30,7 @@
 - **可解释**：每条反馈都记入审计日志（哪句话 → 什么信号 → 哪一档加了多少分）。
 - **可回滚**：每次生效变更存快照，``进化 回滚`` 一键退回。
 - **防注入**：经验内容来自群聊，注入前做净化与指令性内容拦截，
-  并用 <system_reminder> 包裹、声明其为观察记录而非指令。
+  并用 ``<self_evolve_note>`` 专属标签包裹、声明其为观察记录而非指令。
 - **总开关**：关闭后不注入、不学习。
 
 基于 AstrBot v4（Star API，>= 4.16）开发，无第三方依赖。
@@ -70,7 +70,7 @@ from .learning.feedback import SIG_NONE
 from .config_service import ConfigService
 from .store import AuditEntry, LearnStore, PendingItem, _new_id
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 #: 本插件在事件上留下的标记键（命名空间化，避免与其它插件冲突）
 EXTRA_NAMESPACE = "self_evolve"

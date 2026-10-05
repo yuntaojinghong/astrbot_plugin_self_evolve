@@ -72,7 +72,7 @@ window.AstrBotPluginPage = {
     if (endpoint === "reflect") {
       return { message: "🧪 反思完成（结果未生效，需审批）\n\n1. [偏好] 群友喜欢短句（置信 0.80）" };
     }
-    if (endpoint === "persona") {
+    if (endpoint === "persona/save") {
       return { group_id: GROUP, mode: body.mode, text: body.text || "",
                message: body.mode === "follow" ? "已切换为跟随 AstrBot 全局人设" : "已保存本群专属人设" };
     }
@@ -200,8 +200,8 @@ function findByText(sel, text) {
         if (saveBtn) {
           click(saveBtn);
           await settle();
-          const post = calls.filter((c) => c[0] === "POST" && c[1] === "persona").pop();
-          check("保存时发出 POST /persona", !!post, post);
+          const post = calls.filter((c) => c[0] === "POST" && c[1] === "persona/save").pop();
+          check("保存时发出 POST /persona/save", !!post, post);
           check("带上 mode=custom 与人设正文",
                 !!post && post[2].mode === "custom"
                 && String(post[2].text).includes("老朋友"), post ? post[2] : null);

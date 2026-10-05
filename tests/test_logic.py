@@ -1060,6 +1060,50 @@ async def test_panel():
         got = web._tail_of(_Req(url))
         check(f"后缀识别 {want}", got == want, got)
 
+    # 通配参数是**关键字参数**传给处理函数的，签名必须收得下。
+    #
+    # 磐石那边线上真实报错就是：
+    #   TypeError: PanshiWebController.api_dispatch() got an unexpected
+    #              keyword argument 'rest'
+    # 因为用 /<path:rest> 注册时，框架会把解出的通配内容当 kwarg 传进来。
+    # 这个调用约定本地看不到，只能靠签名兜住。
+    import inspect as _inspect
+
+    sig = _inspect.signature(web.api_dispatch)
+    check("api_dispatch 收得下通配参数 rest",
+          "rest" in sig.parameters
+          or any(p.kind is _inspect.Parameter.VAR_KEYWORD
+                 for p in sig.parameters.values()),
+          str(sig))
+
+    # 真按框架的方式调一次：rest 只以关键字传
+    class _FakeReq:
+        path = ("/api/v1/plugins/extensions/astrbot_plugin_self_evolve/"
+                "astrbot_plugin_self_evolve/overview")
+        method = "GET"
+        path_params = {}
+        _request = None
+
+        async def json(self, default=None):
+            return {}
+
+        def get(self, key, default=None):
+            return default
+
+    import astrbot_plugin_self_evolve.pages_api as _pa
+    _saved = _pa.request
+    _pa.request = _FakeReq()
+    try:
+        # 用 GET 端点：这里要验的是「分派成功」，不是方法校验
+        _res = await web.api_dispatch(
+            rest="astrbot_plugin_self_evolve/overview")
+    except TypeError as e:
+        _res = {"error": f"按框架的调用方式失败: {e}"}
+    finally:
+        _pa.request = _saved
+    check("按框架的调用方式能正常分派",
+          not (isinstance(_res, dict) and _res.get("error")), _res)
+
     check("面板控制器实例存在", web is not None, None)
 
     # --- bootstrap ---

@@ -139,23 +139,23 @@ class SelfEvolveWeb:
         if not raw_path:
             return ""
         raw_path = raw_path.split("?", 1)[0].strip("/")
+        return self._normalize_endpoint(raw_path)
 
-        best = ""
-        for ep in self._endpoint_table():
-            if raw_path == ep or raw_path.endswith("/" + ep):
-                if len(ep) > len(best):
-                    best = ep
-        if best:
-            return best
-        parts = raw_path.split("/")
-        return parts[-1] if parts else raw_path
-
-    async def api_dispatch(self):
+    async def api_dispatch(self, rest: str = "", **kwargs):
         """通配入口：按 URL 后缀把请求分派到具体处理函数。
+
+        ``rest`` 是框架从 ``/<path:rest>`` 里解出来的通配内容，会作为
+        **关键字参数**传进来，所以签名里必须收它——否则直接
+        ``TypeError: got an unexpected keyword argument 'rest'``。
+        （磐石那边线上就是这么炸的，同一个写法。）
+        多收一个 ``**kwargs`` 兜住其它版本可能多传的参数。
 
         方法不符返回 405，端点不认识返回 404 并记日志。
         """
-        endpoint = self._tail_of(request)
+        endpoint = str(rest or "").strip("/")
+        endpoint = self._normalize_endpoint(endpoint) if endpoint \
+            else self._tail_of(request)
+
         req_obj = getattr(request, "_request", None) or request
         method = str(getattr(req_obj, "method", "GET") or "GET").upper()
 
@@ -169,6 +169,25 @@ class SelfEvolveWeb:
             return _err(
                 f"{endpoint} 不接受 {method}（允许 {'/'.join(sorted(allowed))}）", 405)
         return await getattr(self, handler_name)()
+
+    def _normalize_endpoint(self, tail: str) -> str:
+        """把一段路径映射成端点名。
+
+        真实 URL 里插件名可能出现 0~2 次，所以不能假定 ``tail`` 就是端点：
+        按**已知端点的最长后缀**匹配来剥离多余前缀。
+        认不出来时原样返回，交给调用方报 404。
+        """
+        tail = str(tail or "").strip("/")
+        if not tail:
+            return ""
+        table = self._endpoint_table()
+        if tail in table:
+            return tail
+        best = ""
+        for ep in table:
+            if tail.endswith("/" + ep) and len(ep) > len(best):
+                best = ep
+        return best or tail
 
     def _wrap(self, handler: Callable) -> Callable:
         async def wrapped(*args, **kwargs):

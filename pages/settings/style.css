@@ -666,88 +666,107 @@ html, body {
 .mini-id { flex: 1; min-width: 0; font-variant-numeric: tabular-nums; }
 .mini-stat { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 
-/* ============================ 进度条 / 滑杆 ============================ */
-
-.bar {
-  position: relative;
-  height: 6px;
-  border-radius: 99px;
-  background: #131b26;
-  overflow: hidden;
-}
-.bar-fill {
-  height: 100%;
-  border-radius: 99px;
-  background: linear-gradient(90deg, var(--accent-2), var(--accent));
-  box-shadow: 0 0 12px rgba(79, 209, 255, 0.5);
-  transform-origin: left center;
-  animation: bar-in 0.6s var(--ease) both;
-}
-@keyframes bar-in {
-  from { transform: scaleX(0); }
-  to   { transform: scaleX(1); }
-}
+/* ============================ 进度条 / 滑杆 ============================
+ * 倾向条（.bar-wrap/.bar）的定义在下面「学到的倾向」一节，
+ * 因为那里的结构关系容易搞反（.bar 是填充、.bar-wrap 是轨道）。
+ */
 
 /* 自定义 range：科技感轨道 + 发光滑块 */
 .slider-row { display: flex; flex-direction: column; gap: 6px; }
 .slider-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.slider-name { font-size: 12.5px; color: var(--fg); }
-.slider-val {
-  font-size: 12.5px;
+.slider-name {
+  font-size: 12px;
+  color: var(--fg-dim);
   font-variant-numeric: tabular-nums;
-  color: var(--accent);
-  min-width: 44px;
+  letter-spacing: 0.02em;
+}
+/* 当前值：加大 + 底色块，和滑杆一起构成"读数" */
+.slider-val {
+  font-size: 14px;
+  font-weight: 600;
+  color: #bdf0ff;
+  min-width: 54px;
   text-align: right;
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: rgba(53, 200, 255, 0.15);
+  border: 1px solid rgba(53, 200, 255, 0.38);
+  font-variant-numeric: tabular-nums;
 }
 .slider-desc { font-size: 11px; color: var(--fg-faint); line-height: 1.6; }
 
+/* 自定义 range：科技感轨道 + 发光滑块
+ *
+ * 上一版"看不清进度条"的原因有两个：
+ *   1. 未填充段用了 #1a2431，和卡片底色几乎一样，等于没有轨道；
+ *   2. 轨道只有 5px，已填充段还是 85% 透明度，整体糊在一起。
+ *
+ * 现在：轨道加高到 9px 并加描边区分，未填充段提亮到能看清，
+ * 已填充段改成实色 + 发光，滑块做成"亮圈 + 暗底 + 亮点"三层，
+ * 位置一眼可辨。
+ */
 input[type="range"] {
   -webkit-appearance: none;
   appearance: none;
   width: 100%;
-  height: 22px;
+  height: 24px;
   background: transparent;
   cursor: pointer;
   margin: 0;
 }
 input[type="range"]::-webkit-slider-runnable-track {
-  height: 5px;
+  height: 9px;
   border-radius: 99px;
-  background:
-    linear-gradient(90deg, rgba(79, 209, 255, 0.85) var(--pct, 50%),
-                    #1a2431 var(--pct, 50%));
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  background: linear-gradient(90deg, #35c8ff var(--pct, 50%),
+                                      #415061 var(--pct, 50%));
+  box-shadow:
+    inset 0 0 0 1px rgba(146, 180, 220, 0.42),
+    0 0 12px rgba(53, 200, 255, 0.18);
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 15px; height: 15px;
-  margin-top: -5px;
+  width: 20px; height: 20px;
+  margin-top: -6px;
   border-radius: 50%;
-  background: #0e141d;
-  border: 2px solid var(--accent);
-  box-shadow: 0 0 10px rgba(79, 209, 255, 0.75);
+  background: radial-gradient(circle at 50% 50%, #eaf9ff 0 3px, #0b1119 3px);
+  border: 2px solid #6fe0ff;
+  box-shadow:
+    0 0 0 3px rgba(11, 17, 25, 0.85),
+    0 0 14px rgba(79, 209, 255, 0.9);
   transition: transform 0.14s var(--ease), box-shadow 0.14s var(--ease);
 }
-input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.18); }
+input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.12);
+  box-shadow:
+    0 0 0 3px rgba(11, 17, 25, 0.85),
+    0 0 20px rgba(79, 209, 255, 1);
+}
 input[type="range"]:active::-webkit-slider-thumb {
-  transform: scale(1.28);
-  box-shadow: 0 0 16px rgba(79, 209, 255, 1);
+  transform: scale(1.2);
+  border-color: #a8ecff;
 }
 input[type="range"]::-moz-range-track {
-  height: 5px; border-radius: 99px; background: #1a2431;
+  height: 9px; border-radius: 99px;
+  background: #415061;
+  box-shadow: inset 0 0 0 1px rgba(146, 180, 220, 0.42);
 }
 input[type="range"]::-moz-range-progress {
-  height: 5px; border-radius: 99px; background: rgba(79, 209, 255, 0.85);
+  height: 9px; border-radius: 99px;
+  background: #35c8ff;
+  box-shadow: 0 0 12px rgba(53, 200, 255, 0.5);
 }
 input[type="range"]::-moz-range-thumb {
-  width: 13px; height: 13px; border-radius: 50%;
-  background: #0e141d; border: 2px solid var(--accent);
-  box-shadow: 0 0 10px rgba(79, 209, 255, 0.75);
+  width: 16px; height: 16px; border-radius: 50%;
+  background: #eaf9ff;
+  border: 2px solid #6fe0ff;
+  box-shadow: 0 0 0 3px rgba(11, 17, 25, 0.85), 0 0 14px rgba(79, 209, 255, 0.9);
 }
 input[type="range"]:focus-visible { outline: none; }
 input[type="range"]:focus-visible::-webkit-slider-thumb {
-  box-shadow: 0 0 0 4px rgba(79, 209, 255, 0.22), 0 0 12px rgba(79, 209, 255, 0.9);
+  box-shadow: 0 0 0 4px rgba(79, 209, 255, 0.28),
+              0 0 0 3px rgba(11, 17, 25, 0.85),
+              0 0 16px rgba(79, 209, 255, 1);
 }
 
 /* 数字/文本输入 */
@@ -960,6 +979,130 @@ input[type="checkbox"] {
   resize: vertical;
   line-height: 1.7;
   font-family: inherit;
+}
+
+/* ============================ 学到的倾向 ============================
+ *
+ * 结构（由 app.js renderLearned 产出）：
+ *   .dims > .dim > .dim-head
+ *                > .cells > .cell[.chosen][.base][.weak]
+ *                            > .bar-wrap > .bar（本元素带行内 width，是"填充条"本身）
+ *                            > .cell-label > span / .cell-pulls
+ *
+ * 注意 .bar 是填充条、.bar-wrap 才是轨道 —— 上一版把它们理解反了，
+ * 结果倾向条整块不可见。
+ */
+.dims { display: flex; flex-direction: column; gap: 16px; }
+.dim-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.cells { display: flex; flex-direction: column; gap: 6px; }
+.cell { display: grid; grid-template-columns: 1fr; gap: 3px; }
+.cell.weak { opacity: 0.45; }
+
+.bar-wrap {
+  height: 9px;
+  background: #415061;
+  border-radius: 99px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(146, 180, 220, 0.42);
+}
+.bar {
+  height: 100%;
+  border-radius: 99px;
+  background: linear-gradient(90deg, #35c8ff, #7cd8ff);
+  box-shadow: 0 0 10px rgba(53, 200, 255, 0.55);
+  animation: bar-in 0.5s var(--ease) both;
+  transform-origin: left center;
+}
+/* 负分（把风格往反方向拉）用暖色，正负一眼分开 */
+.bar.neg {
+  background: linear-gradient(90deg, #ff9d5c, #ffc48a);
+  box-shadow: 0 0 10px rgba(255, 157, 92, 0.55);
+}
+.cell.chosen .bar-wrap {
+  box-shadow: inset 0 0 0 1px rgba(61, 220, 151, 0.75),
+              0 0 10px rgba(61, 220, 151, 0.25);
+}
+.cell.base .bar-wrap { box-shadow: inset 0 0 0 1px rgba(126, 160, 200, 0.55); }
+.cell-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.cell-pulls { color: var(--fg-faint); font-variant-numeric: tabular-nums; }
+
+@keyframes bar-in {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+
+/* ============================ 表格 / 列表辅助 ============================ */
+
+.card-body { margin: 0; font-size: 13.5px; line-height: 1.7; }
+.card.pending { border-color: rgba(255, 180, 84, 0.45); }
+.row-actions { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.signal { font-size: 15px; }
+.signal.pos { filter: none; }
+.signal.neg { filter: none; }
+.foot-note { color: var(--fg-faint); font-size: 11.5px; line-height: 1.8; }
+.tile-hint { font-size: 11px; color: var(--fg-faint); line-height: 1.5; }
+.card.audit { border-left: 2px solid rgba(53, 200, 255, 0.45); }
+.audit-row { padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+.audit-row:last-child { border-bottom: 0; }
+
+/* 设置页的输入框（.input 是 JS 加的类，和原生 input[type=text] 并存） */
+.input {
+  width: 100%;
+  max-width: 320px;
+  background: #0c121a;
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-size: 13px;
+  font-family: inherit;
+  transition: border-color 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+.input:focus {
+  outline: none;
+  border-color: rgba(79, 209, 255, 0.55);
+  box-shadow: 0 0 0 3px rgba(79, 209, 255, 0.12);
+}
+select.input { cursor: pointer; }
+
+/* 保存操作条：吸底，改动多时不用滚回去找按钮 */
+.sticky-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 14px;
+  padding: 11px 13px;
+  border-radius: var(--radius);
+  background: rgba(11, 16, 23, 0.94);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.4);
+}
+
+/* 注入预览 */
+.preview-controls { display: flex; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+.preview-controls .input { max-width: 220px; }
+.preview-box {
+  background: #0b1119;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  margin: 10px 0 0;
+  font-size: 12.5px;
+  line-height: 1.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #c9d8ef;
+  max-height: 320px;
+  overflow-y: auto;
+  font-family: ui-monospace, Consolas, monospace;
 }
 
 /* ============================ 无障碍 ============================ */

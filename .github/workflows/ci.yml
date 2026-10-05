@@ -56,6 +56,9 @@ jobs:
           node tests/panel_no_bridge.test.js
           node tests/panel.test.js
 
+      - name: 样式一致性检查（JS 用到的类必须有 CSS；轨道对比度）
+        run: node tests/style_consistency.test.js
+
       - name: 市场规范检查（logger 只能来自 astrbot.api）
         run: |
           python - <<'PY'

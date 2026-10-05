@@ -68,6 +68,9 @@ class SelfEvolveWeb:
             ("/rollback", self.api_rollback, ["POST"], "回滚到指定版本"),
             ("/switch", self.api_switch, ["POST"], "暂停/恢复学习"),
             ("/reflect", self.api_reflect, ["POST"], "立即执行一次反思"),
+            ("/persona", self.api_persona_get, ["GET"], "读取某群的按群人设"),
+            ("/persona", self.api_persona_set, ["POST"], "写入某群的按群人设"),
+            ("/persona", self.api_persona_clear, ["DELETE"], "删除某群的按群人设（回到跟随全局）"),
             ("/export", self.api_export, ["GET"], "导出某群学习数据"),
             # 面板内改配置：省掉「面板 / AstrBot 原生配置页」来回跳
             ("/config", self.api_config_get, ["GET"], "读取可配置项与当前值"),
@@ -223,6 +226,39 @@ class SelfEvolveWeb:
         if not gid:
             return _err("缺少参数 group_id", 400)
         return _ok({"message": await self.plugin.run_reflection(gid)})
+
+    async def api_persona_get(self):
+        gid = _query_str("group_id")
+        if not gid:
+            return _err("缺少参数 group_id", 400)
+        return _ok({"group_id": gid, **self.plugin.db.get_persona(gid)})
+
+    async def api_persona_set(self):
+        payload = await _json_body()
+        gid = str(payload.get("group_id") or "")
+        if not gid:
+            return _err("缺少参数 group_id", 400)
+        mode = str(payload.get("mode") or "follow")
+        text = str(payload.get("text") or "")
+        if mode == "custom" and not text.strip():
+            return _err("选择「专属人设」时必须填写人设内容", 400)
+        saved = self.plugin.db.set_persona(gid, mode=mode, text=text)
+        await self.plugin.db.maybe_save()
+        hint = ("已切换为跟随 AstrBot 全局人设"
+                if saved["mode"] == "follow"
+                else f"已保存本群专属人设（{len(saved['text'])} 字），下一条消息起生效")
+        return _ok({"group_id": gid, **saved, "message": hint})
+
+    async def api_persona_clear(self):
+        # DELETE 请求体在部分框架/代理上会被丢掉，所以同时支持查询参数
+        payload = await _json_body()
+        gid = str(payload.get("group_id") or _query_str("group_id"))
+        if not gid:
+            return _err("缺少参数 group_id", 400)
+        removed = self.plugin.db.clear_persona(gid)
+        await self.plugin.db.maybe_save()
+        return _ok({"group_id": gid, "removed": removed,
+                    "message": "已删除本群专属人设，回到跟随全局"})
 
     async def api_export(self):
         gid = _query_str("group_id")

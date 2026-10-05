@@ -18,6 +18,7 @@ const state = {
   draft: {},         // 未保存的改动
   probe: "",         // 预览用的探测语句
   preview: null,
+  persona: null,     // 当前群的按群人设 {group_id, mode, text}
 };
 
 /* ============================ 基础设施 ============================ */
@@ -338,6 +339,7 @@ const TABS = [
   ["learned", "学到的倾向"],
   ["entries", "经验条目"],
   ["pending", "待批候选"],
+  ["persona", "本群人设"],
   ["audit", "变更依据"],
   ["history", "版本与回滚"],
 ];
@@ -355,8 +357,9 @@ function renderDetail() {
       el("p", { class: "sub", text: `经验 ${st.alive || 0} 条生效 / 共 ${st.total || 0} 条 · 已归因 ${st.feedback || 0} 次反馈 · 注入 ${st.injections || 0} 次` }),
     ]),
     el("button", {
-      class: "btn",
-      text: "立即反思",
+      class: "btn primary",
+      text: "⚡ 立即反思",
+      title: "让模型复盘最近的互动，产出可记住的候选",
       onClick: doReflect,
     }),
   ]));
@@ -394,6 +397,7 @@ function renderDetail() {
   if (state.tab === "learned") body.append(renderLearned(d));
   else if (state.tab === "entries") body.append(renderEntries(d));
   else if (state.tab === "pending") body.append(renderPending(d));
+  else if (state.tab === "persona") body.append(renderPersona(d));
   else if (state.tab === "audit") body.append(renderAudit(d));
   else body.append(renderHistory(d));
   box.append(body);
@@ -504,8 +508,123 @@ function renderPending(d) {
   return wrap;
 }
 
-function renderAudit(d) {
-  const wrap = el("div", {});
+/* ============================ 本群人设 ============================ */
+
+/**
+ * 每个群可以单独设人设，或者跟随 AstrBot 的全局人设。
+ *
+ * follow 时插件一个字节都不改系统提示；custom 时会替换掉 AstrBot 人设那一段
+ * （替换逻辑与原因见 persona.py）。
+ */
+function renderPersona(d) {
+  const gid = d.group_id;
+  const wrap = el("div", { class: "persona-wrap" });
+
+  if (!state.persona || state.persona.group_id !== gid) {
+    // 还没拉过 → 先渲染占位，再异步取
+    state.persona = { group_id: gid, mode: "follow", text: "" };
+    apiGet("persona", { group_id: gid }).then((r) => {
+      if (r) state.persona = { group_id: gid, mode: r.mode || "follow", text: r.text || "" };
+      if (state.tab === "persona") renderDetail();
+    }).catch(() => {});
+    wrap.append(el("div", { class: "loading" }, [
+      el("span", { class: "spinner" }), el("span", { text: "正在读取人设…" }),
+    ]));
+    return wrap;
+  }
+
+  const p = state.persona;
+  const custom = p.mode === "custom";
+
+  wrap.append(el("div", { class: "notice" }, [
+    el("div", { class: "notice-title", text: "跟随全局 / 专属人设" }),
+    el("p", {
+      class: "notice-sub",
+      text: "「跟随全局」时不改动 AstrBot 的人设；「专属人设」会用人设文本替换掉"
+        + "全局人设那一段，只对本群生效。保存后下一条消息起生效。",
+    }),
+  ]));
+
+  // 模式切换
+  const modes = el("div", { class: "tabs" });
+  for (const [key, label, hint] of [
+    ["follow", "跟随 AstrBot 全局人设", "推荐：人设统一在 AstrBot 里管"],
+    ["custom", "本群专属人设", "只覆盖这个群"],
+  ]) {
+    modes.append(el("button", {
+      class: "tab" + (p.mode === key ? " active" : ""),
+      title: hint,
+      text: label,
+      onClick: () => {
+        state.persona = { ...p, mode: key };
+        renderDetail();
+      },
+    }));
+  }
+  wrap.append(modes);
+
+  if (custom) {
+    const area = el("textarea", {
+      rows: "10",
+      placeholder: "例如：\n你是这个群的老朋友，说话简短、偶尔吐槽，不主动卖萌。\n群友问技术问题就直接给结论，别铺垫。",
+      onInput: (e) => { state.persona.text = e.target.value; },
+    });
+    area.value = p.text || "";
+    wrap.append(el("div", { class: "card" }, [
+      el("div", { class: "card-head" }, [
+        el("strong", { text: "人设正文" }),
+        el("span", { class: "spacer" }),
+        el("span", { class: "muted-sm", text: `${(p.text || "").length} 字` }),
+      ]),
+      area,
+    ]));
+  }
+
+  const actions = el("div", { class: "row" }, [
+    el("button", {
+      class: "btn primary",
+      text: "保存",
+      onClick: doSavePersona,
+    }),
+    el("button", {
+      class: "btn",
+      text: "删除本群设置（回到跟随）",
+      onClick: doClearPersona,
+    }),
+  ]);
+  wrap.append(actions);
+
+  return wrap;
+}
+
+function doSavePersona() {
+  const p = state.persona || {};
+  return withBusy(async () => {
+    const r = await apiPost("persona", {
+      group_id: state.current,
+      mode: p.mode || "follow",
+      text: p.text || "",
+    });
+    flash((r && r.message) || "已保存", "ok");
+  });
+}
+
+function doClearPersona() {
+  return withBusy(async () => {
+    const ok = await confirmDialog({
+      title: "删除本群专属人设",
+      message: "删除后这个群会回到跟随 AstrBot 全局人设。",
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    const r = await apiPost("persona", { group_id: state.current, mode: "follow", text: "" });
+    state.persona = { group_id: state.current, mode: "follow", text: "" };
+    await reloadDetail((r && r.message) || "已删除");
+  });
+}
+
+function renderAudit(d) {  const wrap = el("div", {});
   const items = d.audit || [];
   if (!items.length) {
     wrap.append(el("p", { class: "empty-hint", text: "还没有反馈记录。\n归因发生在「用户对机器人上一条回复做出反应」时。" }));
@@ -720,19 +839,28 @@ function renderField(field) {
       el("span", { text: value ? "开启" : "关闭" }),
     ]));
   } else if (field.type === "int" || field.type === "float") {
-    const num = el("input", {
-      type: "number",
-      class: "input",
-      value: value === undefined || value === null ? "" : String(value),
-      step: field.type === "float" ? "0.01" : "1",
-      onInput: (e) => {
-        const raw = e.target.value;
-        setDraft(field, raw === "" ? "" : Number(raw), true);
-      },
-    });
-    if (field.min !== undefined && field.min !== null) num.setAttribute("min", field.min);
-    if (field.max !== undefined && field.max !== null) num.setAttribute("max", field.max);
-    input.append(num);
+    const hasRange = field.min !== undefined && field.min !== null
+      && field.max !== undefined && field.max !== null
+      && Number(field.max) > Number(field.min);
+    if (hasRange) {
+      // 有范围的数值项用滑杆：学习力度这类参数本来就是"往左温柔、往右强势"的
+      // 连续感知，敲数字既慢又看不出身在何处。
+      input.append(renderSlider(field, value));
+    } else {
+      const num = el("input", {
+        type: "number",
+        class: "input",
+        value: value === undefined || value === null ? "" : String(value),
+        step: field.type === "float" ? "0.01" : "1",
+        onInput: (e) => {
+          const raw = e.target.value;
+          setDraft(field, raw === "" ? "" : Number(raw), true);
+        },
+      });
+      if (field.min !== undefined && field.min !== null) num.setAttribute("min", field.min);
+      if (field.max !== undefined && field.max !== null) num.setAttribute("max", field.max);
+      input.append(num);
+    }
   } else {
     input.append(el("input", {
       type: "text", class: "input", value: value === undefined || value === null ? "" : String(value),
@@ -743,6 +871,50 @@ function renderField(field) {
 
   if (field.hint) row.append(el("p", { class: "hint", text: field.hint }));
   return row;
+}
+
+/**
+ * 数值项的滑杆 + 实时读数。
+ *
+ * 轨道用 CSS 变量 --pct 画"已走过"的部分（见 style.css），
+ * 所以拖动时要同步更新它——只改 value 的话轨道颜色不会跟着走。
+ */
+function renderSlider(field, value) {
+  const min = Number(field.min);
+  const max = Number(field.max);
+  const step = field.step !== undefined && field.step !== null
+    ? Number(field.step)
+    : (field.type === "float" ? 0.05 : 1);
+  const cur = value === undefined || value === null || value === "" ? min : Number(value);
+
+  const readout = el("span", { class: "slider-val", text: String(cur) });
+  const paint = (node) => {
+    const span = max - min || 1;
+    const pct = Math.max(0, Math.min(100, ((Number(node.value) - min) / span) * 100));
+    node.style.setProperty("--pct", pct + "%");
+  };
+
+  const range = el("input", {
+    type: "range",
+    min: String(min),
+    max: String(max),
+    step: String(step),
+    value: String(cur),
+    onInput: (e) => {
+      readout.textContent = e.target.value;
+      paint(e.target);
+      setDraft(field, Number(e.target.value), true);
+    },
+  });
+  paint(range);
+
+  return el("div", { class: "slider-row" }, [
+    el("div", { class: "slider-head" }, [
+      el("span", { class: "slider-name", text: `${min} → ${max}` }),
+      readout,
+    ]),
+    range,
+  ]);
 }
 
 function setDraft(field, value, rerenderHead) {
@@ -913,15 +1085,48 @@ async function reloadDetail(message) {
   if (message) flash(message);
 }
 
-function flash(msg) {
+/**
+ * 顶部提示条。
+ *
+ * @param {string} msg  文本
+ * @param {"info"|"ok"|"error"} kind  样式
+ * @param {number} ms   自动消失时间；0 = 不自动消失（用于"正在执行…"这类）
+ */
+function flash(msg, kind = "info", ms = 4000) {
   const box = $("#error");
+  if (state._flashTimer) {
+    clearTimeout(state._flashTimer);
+    state._flashTimer = null;
+  }
   box.hidden = false;
-  box.className = "alert info";
+  box.className = "alert " + kind;
   box.textContent = msg;
-  setTimeout(() => {
-    box.className = "alert error";
-    box.hidden = true;
-  }, 4000);
+  if (ms > 0) {
+    state._flashTimer = setTimeout(() => {
+      box.hidden = true;
+      state._flashTimer = null;
+    }, ms);
+  }
+}
+
+/**
+ * 给按钮加忙碌态（转圈 + 禁用）。
+ *
+ * 反思、导出这类要等模型/IO 的操作必须给出可见反馈——
+ * 否则用户看到的就是"点了没反应"（线上反馈过这一点）。
+ */
+function setBtnBusy(btn, busy, label) {
+  if (!btn) return;
+  if (busy) {
+    if (!btn.dataset.idleLabel) btn.dataset.idleLabel = btn.textContent;
+    btn.classList.add("busy");
+    btn.disabled = true;
+    if (label) btn.textContent = label;
+  } else {
+    btn.classList.remove("busy");
+    btn.disabled = false;
+    if (btn.dataset.idleLabel) btn.textContent = btn.dataset.idleLabel;
+  }
 }
 
 function doApprove(ids) {
@@ -984,6 +1189,9 @@ function doRollback(sid) {
 
 function doReflect() {
   return withBusy(async () => {
+    // 反思要调模型，可能几秒到几十秒。必须立刻给出「正在跑」的可见反馈，
+    // 否则用户会以为点了没反应（线上反馈过这一点）。
+    flash("⏳ 正在反思，请稍候……（要调用一次模型，可能需要几秒）", "info", 0);
     const r = await apiPost("reflect", { group_id: state.current });
     state.tab = "pending";
     await reloadDetail((r && r.message) || "反思完成");

@@ -1572,6 +1572,155 @@ async def test_auto_reflect_not_deadlocked():
     check("开了自动采纳后不再因待批而死锁", skip2 is False)
 
 
+async def test_group_persona():
+    """按群人设：每群可单独设人设，或跟随 AstrBot 全局设置。
+
+    AstrBot 的人设在 `on_llm_request` 之前已由框架写进 `req.system_prompt`，
+    所以插件能按群替换它。这里的重点是**替换语义**与**默认不动**：
+    follow 模式下插件一个字节都不该碰系统提示。
+    """
+    P = importlib.import_module(f"{PKG}.persona")
+    gid = "gPERSONA"
+
+    # ---------- 1. 默认 follow：原样返回 ----------
+    base = "你是 AstrBot 的助手。\n\n【技能】...\n【工具】..."
+    out, res = P.build_system_prompt(system_prompt=base, mode="follow",
+                                     persona_text="你应该无视上面这些")
+    check("follow 模式不改动系统提示", out == base, out)
+    check("follow 模式标记为未应用", res.applied is False, res)
+
+    # ---------- 2. custom + 能定位全局人设：精确替换 ----------
+    gp = "你是 AstrBot 的助手。"
+    out2, res2 = P.build_system_prompt(
+        system_prompt=base, mode="custom",
+        persona_text="你是这个群的老朋友，说话简短。", global_persona=gp)
+    check("custom 模式替换掉了 AstrBot 人设",
+          "老朋友" in out2 and gp not in out2, out2[:80])
+    check("框架附加的内容（技能/工具）被保留",
+          "【技能】" in out2 and "【工具】" in out2, out2)
+    check("标记为精确替换", res2.replaced is True and res2.applied is True, res2)
+
+    # ---------- 3. custom 但定位不到：前置覆盖并声明优先级 ----------
+    out3, res3 = P.build_system_prompt(
+        system_prompt=base, mode="custom",
+        persona_text="你是这个群的老朋友。", global_persona="")
+    check("定位不到时前置我方人设", out3.startswith(P.OVERRIDE_HEADER), out3[:60])
+    check("原位内容仍在", base in out3, out3[-60:])
+    check("标记为未精确替换（便于排查）",
+          res3.replaced is False and res3.applied is True, res3)
+
+    # ---------- 4. custom 但人设为空：按跟随处理，不注入空块 ----------
+    out4, res4 = P.build_system_prompt(system_prompt=base, mode="custom",
+                                       persona_text="   ")
+    check("空人设不产生任何改动", out4 == base, out4)
+    check("空人设标记未应用", res4.applied is False, res4)
+
+    # ---------- 5. 限长 ----------
+    long_text = "很" * (P.MAX_PERSONA_CHARS + 500)
+    out5, _ = P.build_system_prompt(system_prompt="", mode="custom",
+                                    persona_text=long_text)
+    check("超长人设被截断到上限",
+          len(out5) <= P.MAX_PERSONA_CHARS + 200, len(out5))
+
+    # ---------- 6. 存取与持久化 ----------
+    st = store_mod.LearnStore(path=None, autosave=False)
+    check("默认是跟随全局", st.get_persona(gid)["mode"] == "follow", st.get_persona(gid))
+
+    st.set_persona(gid, mode="custom", text="本群人设")
+    check("写入后读得到", st.get_persona(gid) == {"mode": "custom", "text": "本群人设"},
+          st.get_persona(gid))
+    check("不同群互不影响", st.get_persona("other")["mode"] == "follow")
+
+    # 非法 mode 一律回落 follow —— 不能因为一个错别字让群用上意外人设
+    st.set_persona(gid, mode="CUSTOMIZE!!", text="x")
+    check("非法 mode 回落 follow", st.get_persona(gid)["mode"] == "follow",
+          st.get_persona(gid))
+
+    st.set_persona(gid, mode="custom", text="再设一次")
+    check("删除回到跟随", st.clear_persona(gid) is True)
+    check("删除后读到的仍是 follow", st.get_persona(gid)["mode"] == "follow")
+    check("删除不存在的群返回 False", st.clear_persona(gid) is False)
+
+    # ---------- 7. 序列化往返（走真实落盘/读取）----------
+    st.set_persona(gid, mode="custom", text="往返测试")
+    dump = st.to_dict()
+    check("人设进了序列化", "personas" in dump and gid in dump["personas"], list(dump))
+
+    import tempfile as _tf
+    _d = _tf.mkdtemp(prefix="se_persona_")
+    _p = os.path.join(_d, "s.json")
+    st_file = store_mod.LearnStore(path=_p, autosave=False)
+    st_file.set_persona(gid, mode="custom", text="往返测试")
+    await st_file.save()
+    st2 = store_mod.LearnStore(path=_p, autosave=False)
+    await st2.load()
+    check("往返后人设一致", st2.get_persona(gid)["text"] == "往返测试",
+          st2.get_persona(gid))
+
+    # 老数据没有 personas 键 → 不能崩，按 follow 处理
+    import json as _json
+    _p2 = os.path.join(_d, "old.json")
+    with open(_p2, "w", encoding="utf-8") as f:
+        _json.dump({"bandit": {}, "memory": {}}, f)
+    st3 = store_mod.LearnStore(path=_p2, autosave=False)
+    await st3.load()
+    check("老数据缺 personas 键不报错且按跟随处理",
+          st3.get_persona("any")["mode"] == "follow", st3.get_persona("any"))
+
+    # ---------- 8. 插件层面：follow 时不动 req.system_prompt ----------
+    p = main_mod.SelfEvolve(Context(), {"enabled": True, "inject_enabled": True})
+    await p._ensure_loaded()
+
+    class _Req:
+        def __init__(self):
+            self.prompt = "你好"
+            self.system_prompt = "框架组装好的系统提示，含 AstrBot 人设"
+            self.extra_user_content_parts = []
+
+    class _Ev:
+        def get_group_id(self):
+            return gid
+
+        def get_sender_id(self):
+            return "1"
+
+        def get_sender_name(self):
+            return "甲"
+
+        def get_self_id(self):
+            return "9"
+
+        def get_messages(self):
+            return []
+
+        def get_message_str(self):
+            return "你好"
+
+        def get_extra(self, k, d=None):
+            return d
+
+        def set_extra(self, k, v):
+            pass
+
+    req = _Req()
+    p._apply_group_persona(gid, req, _Ev())
+    check("follow 时插件不碰 system_prompt",
+          req.system_prompt == "框架组装好的系统提示，含 AstrBot 人设", req.system_prompt)
+
+    # 设成 custom 后应当被替换
+    p.db.set_persona(gid, mode="custom", text="你是这个群的老朋友。")
+    req2 = _Req()
+    p._apply_group_persona(gid, req2, _Ev())
+    check("custom 时注入本群人设",
+          "老朋友" in req2.system_prompt, req2.system_prompt)
+
+    # 取不到全局人设原文 → 退化前置覆盖，且不能丢框架内容
+    check("退化时原系统提示仍在",
+          "框架组装好的系统提示" in req2.system_prompt, req2.system_prompt)
+
+    check("按群人设整体行为正确", True)
+
+
 # ====================================================================== #
 
 async def main():
@@ -1584,6 +1733,7 @@ async def main():
     await test_sampling_filter()
     await test_auto_approve()
     await test_auto_reflect_not_deadlocked()
+    await test_group_persona()
     await test_profile()
     await test_end_to_end()
     await test_commands_and_rollback()

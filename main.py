@@ -69,10 +69,11 @@ from .learning import (
     verify_all,
 )
 from .learning.feedback import SIG_NONE
+from .persona import build_system_prompt
 from .config_service import ConfigService
 from .store import AuditEntry, LearnStore, PendingItem, _new_id
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 #: 本插件在事件上留下的标记键（命名空间化，避免与其它插件冲突）
 EXTRA_NAMESPACE = "self_evolve"
@@ -495,6 +496,9 @@ class SelfEvolve(Star):
             # ---- 选策略（含样本门槛：未达标则回退基线）----
             choice = self.db.state.bandit.choose(gid)
 
+            # ---- 按群人设：与"经验注入"是两件事，**不受 inject_enabled 影响** ----
+            self._apply_group_persona(gid, req, event)
+
             prompt = ""
             try:
                 prompt = str(getattr(req, "prompt", "") or "")
@@ -787,6 +791,77 @@ class SelfEvolve(Star):
                 return "", f"调用模型失败：{e}"
         except Exception as e:
             return "", f"调用模型失败：{e}"
+
+    def _apply_group_persona(self, gid: str, req, event) -> None:
+        """按群覆盖人设。失败只记日志，绝不影响正常回复。
+
+        `follow` 模式下一个字节都不改——用户没要求按群人设时，
+        插件不该在任何意义上"碰"系统提示。
+        """
+        try:
+            setting = self.db.get_persona(gid)
+            if setting.get("mode") != "custom":
+                return
+            current = str(getattr(req, "system_prompt", "") or "")
+            merged, result = build_system_prompt(
+                system_prompt=current,
+                mode=setting.get("mode"),
+                persona_text=setting.get("text"),
+                global_persona=self._global_persona_text(event),
+            )
+            if result.applied:
+                req.system_prompt = merged
+                self.db.bump_stat(gid, "persona_applied")
+                logger.debug("[自进化] 群 %s 应用专属人设（%s，%d→%d 字）",
+                             gid, "精确替换" if result.replaced else "前置覆盖",
+                             result.before_len, result.after_len)
+                if not result.replaced:
+                    logger.warning("[自进化] 群 %s 的人设未能精确替换：%s",
+                                   gid, result.reason)
+        except Exception as e:
+            logger.warning("[自进化] 应用按群人设失败（已忽略）: %s", e)
+
+    def _global_persona_text(self, event) -> str:
+        """取 AstrBot 当前人设原文，用于精确定位待替换段落。
+
+        拿不到就返回空串——调用方会退化为前置覆盖，不会报错。
+        """
+        try:
+            mgr = getattr(self.context, "persona_manager", None)
+            if mgr is None:
+                return ""
+            umo = ""
+            for getter in ("unified_msg_origin", "get_unified_msg_origin"):
+                fn = getattr(event, getter, None)
+                if callable(fn):
+                    umo = str(fn() or "")
+                    break
+            if not umo:
+                return ""
+            # 优先按当前会话实际选中的那份人设取
+            for meth in ("resolve_selected_persona", "get_persona"):
+                fn = getattr(mgr, meth, None)
+                if not callable(fn):
+                    continue
+                try:
+                    p = fn(umo)
+                except Exception:
+                    continue
+                if p is None:
+                    continue
+                if isinstance(p, str):
+                    return p.strip()
+                for attr in ("prompt", "system_prompt", "text"):
+                    v = getattr(p, attr, None)
+                    if v:
+                        return str(v).strip()
+                if isinstance(p, dict):
+                    for k in ("prompt", "system_prompt", "text"):
+                        if p.get(k):
+                            return str(p[k]).strip()
+            return ""
+        except Exception:
+            return ""
 
     def _recent_corrections(self, gid: str) -> list[str]:
         out = []

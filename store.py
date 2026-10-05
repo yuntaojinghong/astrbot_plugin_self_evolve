@@ -252,7 +252,42 @@ class LearnStore:
         self.pending: dict[str, list[PendingItem]] = {}
         self.flags: dict = {}
         self.stats: dict = {}
+        #: {group_id: {"mode": "follow"|"custom", "text": "..."}}
+        #: 按群人设。mode=follow 时完全交给 AstrBot 的人设设置（默认）。
+        self.personas: dict[str, dict] = {}
         self._loaded = False
+
+    # ---------- 按群人设 ---------- #
+
+    def get_persona(self, group_id: str) -> dict:
+        """读某群的人设设置。没设过时返回 follow 模式。"""
+        gid = str(group_id or "")
+        raw = self.personas.get(gid)
+        if not isinstance(raw, dict):
+            return {"mode": "follow", "text": ""}
+        mode = str(raw.get("mode") or "follow").strip().lower()
+        if mode not in ("follow", "custom"):
+            mode = "follow"
+        return {"mode": mode, "text": str(raw.get("text") or "")}
+
+    def set_persona(self, group_id: str, *, mode: str, text: str = "") -> dict:
+        """写入某群的人设设置并返回写入后的结果。
+
+        ``mode`` 只接受 ``follow`` / ``custom``。非法值一律回落 ``follow``——
+        宁可跟随全局，也不能因为一个错别字就让某个群用上意外的人设。
+        """
+        gid = str(group_id or "")
+        m = str(mode or "follow").strip().lower()
+        if m not in ("follow", "custom"):
+            m = "follow"
+        payload = {"mode": m, "text": str(text or "")}
+        if gid:
+            self.personas[gid] = payload
+        return payload
+
+    def clear_persona(self, group_id: str) -> bool:
+        """删掉某群的独立人设，回到跟随全局。"""
+        return self.personas.pop(str(group_id or ""), None) is not None
 
     # ---------- 配置热更新 ---------- #
 
@@ -311,6 +346,12 @@ class LearnStore:
         self.pending = self._parse_map(raw.get("pending"), PendingItem.from_dict)
         self.flags = raw.get("flags") or {}
         self.stats = raw.get("stats") or {}
+        # 老数据没有 personas 键 → 空 dict，全部按 follow 处理
+        raw_personas = raw.get("personas")
+        self.personas = {
+            str(k): v for k, v in raw_personas.items()
+            if isinstance(v, dict)
+        } if isinstance(raw_personas, dict) else {}
 
     @staticmethod
     def _parse_map(raw, factory) -> dict:
@@ -338,6 +379,7 @@ class LearnStore:
             "pending": {g: [p.to_dict() for p in v] for g, v in self.pending.items()},
             "flags": self.flags,
             "stats": self.stats,
+            "personas": self.personas,
         }
 
     async def save(self) -> bool:

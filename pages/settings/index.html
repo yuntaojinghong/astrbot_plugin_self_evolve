@@ -7,28 +7,51 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <!-- 视觉层：网格 + 光晕 + 扫描线，纯装饰，不接收事件 -->
+  <div class="fx" aria-hidden="true">
+    <div class="fx-grid"></div>
+    <div class="fx-glow fx-glow-a"></div>
+    <div class="fx-glow fx-glow-b"></div>
+    <div class="fx-scan"></div>
+  </div>
+
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
-        <div class="brand-mark">🧠</div>
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 44 44" width="44" height="44">
+            <circle class="ring ring-out" cx="22" cy="22" r="19" />
+            <circle class="ring ring-mid" cx="22" cy="22" r="13" />
+            <circle class="core" cx="22" cy="22" r="5.5" />
+            <circle class="node n1" cx="22" cy="3" r="2.2" />
+            <circle class="node n2" cx="38.5" cy="31.5" r="2.2" />
+            <circle class="node n3" cx="5.5" cy="31.5" r="2.2" />
+          </svg>
+        </div>
         <div class="brand-text">
-          <h1>自进化</h1>
-          <p>Learning console <span id="versionBadge" class="badge" hidden></span></p>
+          <h1>自进化<span class="brand-dot"></span></h1>
+          <p>LEARNING CONSOLE <span id="versionBadge" class="badge" hidden></span></p>
         </div>
       </div>
 
-      <div class="switch-row">
-        <button id="btnPause" class="btn ghost wide">暂停学习</button>
-        <button id="btnReload" class="btn ghost wide">刷新数据</button>
+      <div class="ctrl-row">
+        <button id="btnPause" class="btn ghost wide">
+          <span class="btn-dot"></span><span class="btn-label">暂停学习</span>
+        </button>
+        <button id="btnReload" class="btn ghost wide">
+          <span class="btn-ico">⟳</span><span class="btn-label">刷新数据</span>
+        </button>
       </div>
-      <div class="switch-row">
-        <button id="btnSettings" class="btn ghost wide">⚙ 全局设置</button>
+      <div class="ctrl-row">
+        <button id="btnSettings" class="btn ghost wide">
+          <span class="btn-ico">⚙</span><span class="btn-label">全局设置</span>
+        </button>
       </div>
 
+      <div class="side-label">已学习的群</div>
       <div id="groupList" class="group-list"></div>
       <p class="sidebar-foot">
-        设置、学习结果、审批与回滚都在本页完成，<br>
-        不必再跳到 AstrBot 原生配置页。<br>
+        设置、学习结果、审批与回滚都在本页完成。<br>
         策略分数是学习出来的，不提供手改入口——<br>
         要人工干预请用经验条目与回滚。
       </p>
@@ -38,8 +61,13 @@
       <div id="error" class="alert error" hidden></div>
       <div id="content" class="content">
         <div class="placeholder">
-          <div class="placeholder-icon">🧠</div>
-          <p>从左侧选择一个群，查看它学到了什么。</p>
+          <div class="placeholder-mark" aria-hidden="true">
+            <span class="pm-ring"></span>
+            <span class="pm-ring pm-ring-2"></span>
+            <span class="pm-core">◎</span>
+          </div>
+          <p class="placeholder-title">等待选择目标群</p>
+          <p class="placeholder-hint">从左侧点一个群，查看它学到了什么。</p>
         </div>
       </div>
     </main>

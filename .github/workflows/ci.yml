@@ -54,6 +54,7 @@ jobs:
           npm install --no-save --no-audit --no-fund jsdom
           node tests/panel_load.test.js
           node tests/panel_no_bridge.test.js
+          node tests/panel.test.js
 
       - name: 市场规范检查（logger 只能来自 astrbot.api）
         run: |

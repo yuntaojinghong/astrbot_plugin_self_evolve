@@ -49,6 +49,14 @@ jobs:
       - name: 面板设置端到端测试
         run: python -X utf8 tests/test_settings.py
 
+      # 上面两条是**脚本**测试，各自独立进程（它们都改 sys.modules，
+      # 同进程跑会互相覆盖对方的桩）。这里再用 pytest 跑一遍入口检查：
+      # 确认这些脚本还在、语法没坏、用例没被大段删掉。
+      - name: pytest 入口检查
+        run: |
+          python -m pip install --upgrade pip pytest
+          python -m pytest -q
+
       - name: 面板前端加载测试（jsdom）
         run: |
           npm install --no-save --no-audit --no-fund jsdom

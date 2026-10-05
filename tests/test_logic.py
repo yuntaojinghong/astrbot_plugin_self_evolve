@@ -1018,12 +1018,24 @@ async def test_panel():
     # --- 路由注册 ---
     check("构造面板时已注册路由", len(ctx.routes) > 0, len(getattr(ctx, "routes", [])))
     prefixes = {r[0] for r in ctx.routes}
-    check("路由都带插件名前缀",
-                all(x.startswith("/astrbot_plugin_self_evolve/") for x in prefixes), sorted(prefixes))
+    #
+    # 注意：路由**不能**带插件名前缀。
+    #
+    # 这里原来断言的是 all(x.startswith("/astrbot_plugin_self_evolve/"))，
+    # 结果把 bug 当成了规格锁住——面板所有接口都返回「未找到该路由」。
+    #
+    # AstrBot 4.28.2 的匹配链路（读自 dashboard/api/plugins 的字节码）：
+    #   路由声明   /plugins/extensions/{plugin_path:path}
+    #   plugin_path = "astrbot_plugin_self_evolve/preview"
+    #   _match_registered_web_api 用**整条** plugin_path 去 fullmatch 注册路径
+    # 插件名没有被剥掉，所以注册时要只写子路径。
+    check("路由都不带插件名前缀",
+          all("astrbot_plugin_self_evolve" not in x for x in prefixes),
+          sorted(prefixes))
+    check("路由都以 / 开头",
+          all(x.startswith("/") for x in prefixes), sorted(prefixes))
     check("注册了必需接口",
-                {"/astrbot_plugin_self_evolve/approve",
-                 "/astrbot_plugin_self_evolve/rollback",
-                 "/astrbot_plugin_self_evolve/group"} <= prefixes, sorted(prefixes))
+          {"/approve", "/rollback", "/group"} <= prefixes, sorted(prefixes))
 
     web = p.web
     check("面板控制器实例存在", web is not None, None)

@@ -78,17 +78,39 @@ class SelfEvolveWeb:
             ("/preview", self.api_preview, ["POST"], "预览实际会注入的内容"),
         ]
 
+        # 注册的路径**不带插件名前缀**。
+        #
+        # 之前这里写的是 f"/{PLUGIN_NAME}{path}"，导致面板所有接口都返回
+        # 「未找到该路由」。原因（读自 AstrBot 4.28.2 的
+        # dashboard/api/plugins.cpython-312.pyc）：
+        #
+        #   路由声明   /plugins/extensions/{plugin_path:path}
+        #   plugin_path = "astrbot_plugin_self_evolve/preview"
+        #   _match_registered_web_api(registered_web_apis, plugin_path, method)
+        #       request_path = "/" + subpath.lstrip("/")
+        #       re.fullmatch(pattern, request_path)     # 用注册路径匹配整条
+        #
+        # 插件名没有被剥掉，所以注册时必须只写子路径。
+        # 多一个前缀会让**每一条**路由都匹配不上（单段也一样失效），
+        # 而页面本身照旧能打开（HTML 是静态文件），
+        # 表现为「界面出来了、点什么都提示未找到该路由」。
         ok = 0
+        registered_paths: list[str] = []
         for path, handler, methods, desc in routes:
+            candidate = path if path.startswith("/") else f"/{path}"
             try:
-                register(f"/{PLUGIN_NAME}{path}", self._wrap(handler), methods, desc)
+                register(candidate, self._wrap(handler), methods, desc)
                 ok += 1
+                registered_paths.append(candidate)
             except Exception as e:
-                logger.error("[自进化] 注册路由 %s 失败: %s", path, e)
+                logger.error("[自进化] 注册路由 %s 失败: %s", candidate, e)
         self._registered = ok > 0
         self.registered = self._registered
         if self._registered:
-            logger.info("[自进化] 配置面板已注册 %s 个接口", ok)
+            logger.info(
+                "[自进化] 配置面板已注册 %s 个接口，子路径示例: %s",
+                ok, ", ".join(registered_paths[:4]),
+            )
         return self._registered
 
     def _wrap(self, handler: Callable) -> Callable:

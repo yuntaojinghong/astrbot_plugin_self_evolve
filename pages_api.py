@@ -57,61 +57,118 @@ class SelfEvolveWeb:
                            globals().get("_WEB_IMPORT_ERROR", ""))
             return False
 
-        routes: list[tuple[str, Callable, list[str], str]] = [
-            ("/bootstrap", self.api_bootstrap, ["GET"], "面板初始化数据"),
-            ("/overview", self.api_overview, ["GET"], "全部群学习概览"),
-            ("/group", self.api_group, ["GET"], "单个群的学习详情"),
-            ("/approve", self.api_approve, ["POST"], "采纳待批候选"),
-            ("/reject", self.api_reject, ["POST"], "驳回待批候选"),
-            ("/forget", self.api_forget, ["POST"], "删除经验条目"),
-            ("/reset_group", self.api_reset_group, ["POST"], "清空并移除某个群的学习数据"),
-            ("/rollback", self.api_rollback, ["POST"], "回滚到指定版本"),
-            ("/switch", self.api_switch, ["POST"], "暂停/恢复学习"),
-            ("/reflect", self.api_reflect, ["POST"], "立即执行一次反思"),
-            ("/persona", self.api_persona_get, ["GET"], "读取某群的按群人设"),
-            ("/persona", self.api_persona_set, ["POST"], "写入某群的按群人设"),
-            ("/persona", self.api_persona_clear, ["DELETE"], "删除某群的按群人设（回到跟随全局）"),
-            ("/export", self.api_export, ["GET"], "导出某群学习数据"),
-            # 面板内改配置：省掉「面板 / AstrBot 原生配置页」来回跳
-            ("/config", self.api_config_get, ["GET"], "读取可配置项与当前值"),
-            ("/config", self.api_config_set, ["POST"], "写入配置改动"),
-            ("/preview", self.api_preview, ["POST"], "预览实际会注入的内容"),
-        ]
-
-        # 注册的路径**不带插件名前缀**。
+        # 注册一条通配路由，真正是哪个接口靠 URL 后缀判断。
         #
-        # 之前这里写的是 f"/{PLUGIN_NAME}{path}"，导致面板所有接口都返回
-        # 「未找到该路由」。原因（读自 AstrBot 4.28.2 的
-        # dashboard/api/plugins.cpython-312.pyc）：
+        # 为什么不按固定路径注册：地址前面有几层前缀不由插件决定。
+        # 实测过的真实地址里插件名出现过两次 ——
+        #   /api/v1/plugins/extensions/astrbot_plugin_self_evolve/
+        #                              astrbot_plugin_self_evolve/preview
+        # 路由声明是 /plugins/extensions/{plugin_path:path}，plugin_path 取整条剩余
+        # 路径，再拿它去 fullmatch 注册路径。所以「带前缀」和「不带前缀」两种
+        # 固定写法都会在另一种情况下全部失配，而页面本身照旧能打开
+        # （HTML 是静态文件），表现为「界面出来了、点什么都提示未找到该路由」。
         #
-        #   路由声明   /plugins/extensions/{plugin_path:path}
-        #   plugin_path = "astrbot_plugin_self_evolve/preview"
-        #   _match_registered_web_api(registered_web_apis, plugin_path, method)
-        #       request_path = "/" + subpath.lstrip("/")
-        #       re.fullmatch(pattern, request_path)     # 用注册路径匹配整条
-        #
-        # 插件名没有被剥掉，所以注册时必须只写子路径。
-        # 多一个前缀会让**每一条**路由都匹配不上（单段也一样失效），
-        # 而页面本身照旧能打开（HTML 是静态文件），
-        # 表现为「界面出来了、点什么都提示未找到该路由」。
+        # 用 /<path:rest> 匹配任何深度，再用后缀定位端点，就与前缀层数无关了。
+        # 接口清单见 _endpoint_table()。
+        wildcard = [("/<path:rest>", self.api_dispatch,
+                     ["GET", "POST", "DELETE"], "面板接口（按后缀分派）")]
         ok = 0
-        registered_paths: list[str] = []
-        for path, handler, methods, desc in routes:
+        for path, handler, methods, desc in wildcard:
             candidate = path if path.startswith("/") else f"/{path}"
             try:
                 register(candidate, self._wrap(handler), methods, desc)
                 ok += 1
-                registered_paths.append(candidate)
             except Exception as e:
                 logger.error("[自进化] 注册路由 %s 失败: %s", candidate, e)
         self._registered = ok > 0
         self.registered = self._registered
         if self._registered:
             logger.info(
-                "[自进化] 配置面板已注册 %s 个接口，子路径示例: %s",
-                ok, ", ".join(registered_paths[:4]),
+                "[自进化] 配置面板已注册通配接口，共 %s 个端点",
+                len(self._endpoint_table()),
             )
         return self._registered
+
+    def _endpoint_table(self) -> dict[str, tuple[str, set[str]]]:
+        """端点表：URL 后缀 -> (处理函数名, 允许的方法)。
+
+        后缀与前端 ``apiGet`` / ``apiPost`` 传的字符串**必须一致**。
+        读和写共用同一个后缀，靠请求方法区分——这与前端原有调用一致：
+
+        * ``config``   GET = 读配置，POST = 写配置
+        * ``persona``  GET = 读人设，POST = 写人设，DELETE = 清除
+
+        同后缀挂多方法在这里很自然：分派时先按后缀查表，再校验方法。
+        """
+        return {
+            "bootstrap": ("api_bootstrap", {"GET"}),
+            "overview": ("api_overview", {"GET"}),
+            "group": ("api_group", {"GET"}),
+            "approve": ("api_approve", {"POST"}),
+            "reject": ("api_reject", {"POST"}),
+            "forget": ("api_forget", {"POST"}),
+            "reset_group": ("api_reset_group", {"POST"}),
+            "rollback": ("api_rollback", {"POST"}),
+            "switch": ("api_switch", {"POST"}),
+            "reflect": ("api_reflect", {"POST"}),
+            "export": ("api_export", {"GET"}),
+            "preview": ("api_preview", {"POST"}),
+            "config": ("api_config_get", {"GET"}),
+            "config/save": ("api_config_set", {"POST"}),
+            "persona": ("api_persona_get", {"GET"}),
+            "persona/save": ("api_persona_set", {"POST"}),
+            "persona/clear": ("api_persona_clear", {"DELETE"}),
+        }
+
+    def _tail_of(self, request_) -> str:
+        """从请求里取出端点后缀，形如 ``"preview"``。
+
+        优先用框架解析出的通配参数；取不到再从完整路径里按**已知端点后缀**
+        定位——这样与地址前头有多少层前缀无关。
+        """
+        params = getattr(request_, "path_params", None)
+        if isinstance(params, dict) and params.get("rest"):
+            return str(params["rest"]).strip("/")
+
+        raw_path = ""
+        for src in (request_, getattr(request_, "_request", None)):
+            p = getattr(src, "path", None)
+            if isinstance(p, str) and p:
+                raw_path = p
+                break
+        if not raw_path:
+            return ""
+        raw_path = raw_path.split("?", 1)[0].strip("/")
+
+        best = ""
+        for ep in self._endpoint_table():
+            if raw_path == ep or raw_path.endswith("/" + ep):
+                if len(ep) > len(best):
+                    best = ep
+        if best:
+            return best
+        parts = raw_path.split("/")
+        return parts[-1] if parts else raw_path
+
+    async def api_dispatch(self):
+        """通配入口：按 URL 后缀把请求分派到具体处理函数。
+
+        方法不符返回 405，端点不认识返回 404 并记日志。
+        """
+        endpoint = self._tail_of(request)
+        req_obj = getattr(request, "_request", None) or request
+        method = str(getattr(req_obj, "method", "GET") or "GET").upper()
+
+        hit = self._endpoint_table().get(endpoint)
+        if hit is None:
+            logger.warning("[自进化] 面板请求了未知端点: %r", endpoint)
+            return _err(f"未知接口 {endpoint!r}，请更新插件", 404)
+
+        handler_name, allowed = hit
+        if method not in allowed:
+            return _err(
+                f"{endpoint} 不接受 {method}（允许 {'/'.join(sorted(allowed))}）", 405)
+        return await getattr(self, handler_name)()
 
     def _wrap(self, handler: Callable) -> Callable:
         async def wrapped(*args, **kwargs):

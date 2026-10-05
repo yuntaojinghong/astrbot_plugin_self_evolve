@@ -600,7 +600,7 @@ function renderPersona(d) {
 function doSavePersona() {
   const p = state.persona || {};
   return withBusy(async () => {
-    const r = await apiPost("persona", {
+    const r = await apiPost("persona/save", {
       group_id: state.current,
       mode: p.mode || "follow",
       text: p.text || "",
@@ -618,7 +618,7 @@ function doClearPersona() {
       danger: true,
     });
     if (!ok) return;
-    const r = await apiPost("persona", { group_id: state.current, mode: "follow", text: "" });
+    const r = await apiPost("persona/save", { group_id: state.current, mode: "follow", text: "" });
     state.persona = { group_id: state.current, mode: "follow", text: "" };
     await reloadDetail((r && r.message) || "已删除");
   });
@@ -939,7 +939,7 @@ async function doSaveConfig() {
     return;
   }
   return withBusy(async () => {
-    const r = await apiPost("config", { values: dirty });
+    const r = await apiPost("config/save", { values: dirty });
     state.settings = await apiGet("config");
     state.draft = {};
     renderSettings();

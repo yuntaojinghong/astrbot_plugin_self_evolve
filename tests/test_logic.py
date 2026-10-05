@@ -1029,15 +1029,37 @@ async def test_panel():
     #   plugin_path = "astrbot_plugin_self_evolve/preview"
     #   _match_registered_web_api 用**整条** plugin_path 去 fullmatch 注册路径
     # 插件名没有被剥掉，所以注册时要只写子路径。
-    check("路由都不带插件名前缀",
-          all("astrbot_plugin_self_evolve" not in x for x in prefixes),
-          sorted(prefixes))
+    check("注册的是通配路由（前缀层数不由插件决定）",
+          any("<path:" in x for x in prefixes), sorted(prefixes))
     check("路由都以 / 开头",
           all(x.startswith("/") for x in prefixes), sorted(prefixes))
-    check("注册了必需接口",
-          {"/approve", "/rollback", "/group"} <= prefixes, sorted(prefixes))
 
     web = p.web
+
+    # 端点表是唯一的接口清单，里面的处理函数必须真实存在
+    table = web._endpoint_table()
+    missing = [n for n, _m in table.values() if not hasattr(web, n)]
+    check("端点表里的处理函数都存在", not missing, missing)
+    check("端点表覆盖了前端会调的接口",
+          {"bootstrap", "overview", "group", "approve", "reject", "forget",
+           "reset_group", "rollback", "switch", "reflect", "persona",
+           "persona/save", "export", "config", "config/save",
+           "preview"} <= set(table), sorted(table))
+
+    # 地址前缀层数不同，都要能定位到同一个端点
+    class _Req:
+        def __init__(self, path):
+            self.path = path
+    for url, want in (
+        ("/api/v1/plugins/extensions/astrbot_plugin_self_evolve/astrbot_plugin_self_evolve/preview", "preview"),
+        ("/api/v1/plugins/extensions/astrbot_plugin_self_evolve/preview", "preview"),
+        ("/plugins/extensions/preview", "preview"),
+        ("/x/y/astrbot_plugin_self_evolve/config/save", "config/save"),
+        ("/x/y/astrbot_plugin_self_evolve/persona/save", "persona/save"),
+    ):
+        got = web._tail_of(_Req(url))
+        check(f"后缀识别 {want}", got == want, got)
+
     check("面板控制器实例存在", web is not None, None)
 
     # --- bootstrap ---
